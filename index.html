@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>Dead Arena — 3D Zombie Survival</title>
+  <link rel="icon" href="data:," />
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #05070c; color: #cdd6e4; }
+    body { font-family: "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif; }
+    #app { position: fixed; inset: 0; }
+    canvas { display: block; }
+
+    /* Top status bar */
+    #hud { position: fixed; top: 0; left: 0; right: 0; display: flex; gap: 18px;
+      align-items: center; padding: 12px 18px; pointer-events: none; z-index: 5;
+      background: linear-gradient(180deg, rgba(0,0,0,0.55), rgba(0,0,0,0)); }
+    #hud .stat { display: flex; flex-direction: column; }
+    #hud .label { font-size: 11px; letter-spacing: 2px; text-transform: uppercase;
+      color: #6f7f95; font-weight: 600; }
+    #hud .value { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums;
+      color: #eaf1fb; text-shadow: 0 0 12px rgba(120,180,255,0.35); }
+    #healthbar { width: 220px; height: 12px; margin-top: 4px; border: 1px solid rgba(255,255,255,0.25);
+      border-radius: 8px; overflow: hidden; background: rgba(0,0,0,0.5); }
+    #healthfill { height: 100%; width: 100%; border-radius: 7px;
+      background: linear-gradient(90deg, #28d17a, #58f0a0); transition: width 0.15s linear, background 0.2s; }
+    #hpvalue { margin-top: 3px; font-size: 12px; color: #9fb0c4; }
+
+    /* Center overlay (click to play / death) */
+    #overlay { position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; text-align: center; cursor: pointer;
+      background: radial-gradient(120% 120% at 50% 30%, rgba(10,16,26,0.55), rgba(3,5,9,0.92));
+      transition: opacity 0.3s; }
+    #overlay.hidden { opacity: 0; pointer-events: none; }
+    #overlay h1 { font-size: 46px; margin: 0 0 6px; letter-spacing: 3px; color: #e7eefa;
+      text-shadow: 0 0 24px rgba(80,160,255,0.5); }
+    #overlay h1 .sub { color: #58f0a0; }
+    #overlay p { color: #93a3b8; margin: 6px 0; max-width: 520px; line-height: 1.5; }
+    #overlay .keys { display: flex; gap: 8px; margin: 16px 0; flex-wrap: wrap; justify-content: center; }
+    #overlay kbd { display: inline-block; min-width: 34px; padding: 8px 12px; border-radius: 8px;
+      border: 1px solid rgba(255,255,255,0.25); border-bottom-width: 3px; background: rgba(255,255,255,0.06);
+      color: #eaf1fb; font-weight: 700; font-family: inherit; }
+    #overlay .cta { margin-top: 18px; font-size: 18px; color: #8fd0ff; letter-spacing: 1px;
+      animation: pulse 1.6s ease-in-out infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 0.5; } 50% { opacity: 1; } }
+
+    #dead-title { color: #ff5a6e !important; text-shadow: 0 0 24px rgba(255,70,90,0.6) !important; }
+    #vignette { position: fixed; inset: 0; pointer-events: none; z-index: 4; opacity: 0;
+      background: radial-gradient(120% 100% at 50% 50%, transparent 55%, rgba(120,0,0,0.55) 100%);
+      transition: opacity 0.2s; }
+    #hint { position: fixed; bottom: 12px; left: 0; right: 0; text-align: center; z-index: 5;
+      color: #5a6a80; font-size: 12px; letter-spacing: 1px; pointer-events: none; }
+  </style>
+
+  <!-- Pinned Three.js via a CDN import map (no npm, no local copies). -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="app"></div>
+
+  <div id="hud">
+    <div class="stat">
+      <span class="label">Health</span>
+      <div id="healthbar"><div id="healthfill"></div></div>
+      <span id="hpvalue">100 / 100</span>
+    </div>
+    <div class="stat">
+      <span class="label">Survived</span>
+      <span class="value" id="timer">0:00</span>
+    </div>
+    <div class="stat">
+      <span class="label">Distance</span>
+      <span class="value" id="distance">--</span>
+    </div>
+  </div>
+
+  <div id="vignette"></div>
+  <div id="hint">WASD move &middot; mouse look &middot; Shift run &middot; Esc release cursor</div>
+
+  <div id="overlay">
+    <h1>DEAD<span class="sub"> ARENA</span></h1>
+    <p>You are alone in a night arena. One zombie is hunting you.<br />Stay away and survive as long as you can.</p>
+    <div class="keys">
+      <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd>
+      <span style="align-self:center;color:#5a6a80">move</span>
+      <kbd>Shift</kbd>
+      <span style="align-self:center;color:#5a6a80">sprint</span>
+      <kbd>Mouse</kbd>
+      <span style="align-self:center;color:#5a6a80">look</span>
+    </div>
+    <div class="cta">Click to play</div>
+  </div>
+
+  <script type="module" src="./main.js"></script>
+</body>
+</html>

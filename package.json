@@ -1,0 +1,10 @@
+{
+  "name": "zombie3d",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Small 3D first-person zombie survival game built with Three.js (CDN import map, no build step).",
+  "scripts": {
+    "check": "node --check main.js"
+  }
+}
