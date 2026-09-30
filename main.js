@@ -23,6 +23,12 @@ const HIT_RANGE = 1.5;          // horizontal distance within which the zombie c
 const HIT_COOLDOWN = 0.8;      // seconds between zombie bites
 const ZOMBIE_HIT_DAMAGE = 12;
 
+// Shooting
+const FIRE_COOLDOWN = 0.18;     // seconds between shots
+const BULLET_DAMAGE = 34;
+const RECOIL = 0.03;           // camera pitch kick per shot
+const LIGHT_BASE = 6;          // resting flashlight intensity
+
 // ---------------------------------------------------------------------------
 // Renderer / scene / camera
 // ---------------------------------------------------------------------------
@@ -33,6 +39,7 @@ const healthFill = document.getElementById('healthfill');
 const hpValue = document.getElementById('hpvalue');
 const timerValue = document.getElementById('timer');
 const distanceValue = document.getElementById('distance');
+const waveValue = document.getElementById('wave');
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
@@ -65,6 +72,16 @@ window.addEventListener('keyup', (e) => {
   keys[e.code] = false;
 });
 
+// Click to fire (only while the pointer is locked and the game is live).
+renderer.domElement.addEventListener('mousedown', (e) => {
+  if (e.button !== 0) return;
+  if (!controls.isLocked || !playing || dead) return;
+  const now = performance.now();
+  if (now < nextFireTime) return;
+  nextFireTime = now + FIRE_COOLDOWN * 1000;
+  shoot();
+});
+
 // ---------------------------------------------------------------------------
 // Lights — a single cool moonlight + a warm flashlight the player carries.
 // ---------------------------------------------------------------------------
@@ -84,7 +101,7 @@ moon.shadow.bias = -0.0008;
 scene.add(moon);
 scene.add(moon.target);
 
-const flashlight = new THREE.SpotLight(0xfff2cf, 6, 55, Math.PI / 5.5, 0.5, 1.2);
+const flashlight = new THREE.SpotLight(0xfff2cf, LIGHT_BASE, 55, Math.PI / 5.5, 0.5, 1.2);
 scene.add(flashlight);
 scene.add(flashlight.target);
 
@@ -215,6 +232,10 @@ zombie.group.position.set(28, 0, 28); // start far from the player
 zombie.velocity = new THREE.Vector3();
 zombie.hp = ZOMBIE_HP;
 zombie.hitTimer = 0;
+zombie.speed = ZOMBIE_SPEED;
+zombie.dead = false;
+zombie.deathT = 0;
+zombie.respawnTimer = 0;
 scene.add(zombie.group);
 
 function createZombie() {
@@ -261,6 +282,155 @@ function createZombie() {
 }
 
 // ---------------------------------------------------------------------------
+// Zombie health bar (billboarded above the head; added to the scene directly
+// so it stays upright regardless of the zombie's facing).
+// ---------------------------------------------------------------------------
+const healthBar = (() => {
+  const group = new THREE.Group();
+  const W = 0.95, H = 0.13;
+  const back = new THREE.Mesh(
+    new THREE.PlaneGeometry(W, H),
+    new THREE.MeshBasicMaterial({ color: 0x11141a, transparent: true, opacity: 0.85 })
+  );
+  const fillGeo = new THREE.PlaneGeometry(W, H);
+  fillGeo.translate(W / 2, 0, 0); // anchor the fill at the left edge
+  const fill = new THREE.Mesh(
+    fillGeo,
+    new THREE.MeshBasicMaterial({ color: 0x58f0a0, transparent: true })
+  );
+  fill.position.set(-W / 2, 0, 0.002);
+  group.add(back, fill);
+  group.position.set(0, 2.35, 0);
+  return { group, fill };
+})();
+scene.add(healthBar.group);
+
+// ---------------------------------------------------------------------------
+// Shooting — raycast from the screen centre, with tracer + muzzle flash + spark.
+// ---------------------------------------------------------------------------
+const raycaster = new THREE.Raycaster();
+const centerNDC = new THREE.Vector2(0, 0);
+const glowTex = makeGlowTexture();
+const tracerGeo = (() => {
+  const g = new THREE.BoxGeometry(0.035, 0.035, 1);
+  g.translate(0, 0, 0.5); // extend along +Z so lookAt(to) aims the far end at the target
+  return g;
+})();
+const effects = [];
+const muzzleLocal = new THREE.Vector3(0.34, -0.34, -0.9);
+const _shootDir = new THREE.Vector3();
+
+function spawnEffect(obj, ttl, fade = true) {
+  obj.userData.ttl = ttl;
+  obj.userData.maxLife = ttl;
+  obj.userData.fade = fade;
+  scene.add(obj);
+  effects.push(obj);
+}
+function updateEffects(dt) {
+  for (let i = effects.length - 1; i >= 0; i--) {
+    const e = effects[i];
+    e.userData.ttl -= dt;
+    if (e.userData.ttl <= 0) {
+      scene.remove(e);
+      if (e.geometry) e.geometry.dispose();
+      if (e.material) e.material.dispose();
+      effects.splice(i, 1);
+      continue;
+    }
+    if (e.userData.fade && e.material) {
+      e.material.opacity = e.userData.ttl / e.userData.maxLife;
+    }
+  }
+}
+function spawnTracer(from, to) {
+  const dir = to.clone().sub(from);
+  const mesh = new THREE.Mesh(tracerGeo, new THREE.MeshBasicMaterial({
+    color: 0xfff0c0, transparent: true, opacity: 1,
+    blending: THREE.AdditiveBlending, depthTest: false,
+  }));
+  mesh.position.copy(from);
+  mesh.scale.z = Math.max(0.001, dir.length());
+  mesh.lookAt(to);
+  spawnEffect(mesh, 0.07);
+}
+function spawnMuzzleFlash(pos) {
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: glowTex, color: 0xffe0a0, transparent: true, opacity: 1,
+    blending: THREE.AdditiveBlending, depthTest: false,
+  }));
+  s.position.copy(pos);
+  s.scale.set(0.6, 0.6, 1);
+  spawnEffect(s, 0.07);
+}
+function spawnHitSpark(pos) {
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: glowTex, color: 0xff5a3a, transparent: true, opacity: 1,
+    blending: THREE.AdditiveBlending, depthTest: false,
+  }));
+  s.position.copy(pos);
+  s.scale.set(0.45, 0.45, 1);
+  spawnEffect(s, 0.12);
+}
+
+function shoot() {
+  // Muzzle world position (front of the barrel, in camera space).
+  const muzzle = muzzleLocal.clone().applyMatrix4(camera.matrixWorld);
+
+  raycaster.setFromCamera(centerNDC, camera);
+  const targets = [];
+  zombie.group.traverse((o) => { if (o.isMesh) targets.push(o); });
+  const hits = raycaster.intersectObjects(targets, false);
+  const hitPoint = hits.length ? hits[0].point : null;
+
+  const end = hitPoint
+    ? hitPoint
+    : camera.getWorldDirection(_shootDir).clone().multiplyScalar(80).add(camera.position);
+  spawnTracer(muzzle, end);
+  spawnMuzzleFlash(muzzle);
+
+  // Recoil impulse + light spike (the kick is baked into the camera per-frame).
+  recoilImpulse = Math.min(0.14, recoilImpulse + RECOIL);
+  flashlight.intensity = LIGHT_BASE + 6;
+
+  if (hitPoint && !zombie.dead) {
+    zombie.hp -= BULLET_DAMAGE;
+    updateZombieHealthBar();
+    spawnHitSpark(hitPoint);
+    if (zombie.hp <= 0) killZombie();
+  }
+}
+function updateZombieHealthBar() {
+  const pct = Math.max(0, zombie.hp) / ZOMBIE_HP;
+  healthBar.fill.scale.x = pct;
+  healthBar.fill.material.color.set(pct > 0.5 ? 0x58f0a0 : pct > 0.25 ? 0xffd36e : 0xff5a5e);
+}
+function killZombie() {
+  if (zombie.dead) return;
+  zombie.dead = true;
+  zombie.deathT = 0;
+  zombie.respawnTimer = 1.6;
+  zombie.hp = 0;
+  kills++;
+  updateZombieHealthBar();
+}
+function respawnZombie() {
+  wave++;
+  const ang = Math.random() * Math.PI * 2;
+  const r = ARENA_HALF - 4;
+  const x = Math.cos(ang) * r;
+  const z = Math.sin(ang) * r;
+  zombie.group.position.set(x, 0, z);
+  zombie.group.rotation.set(0, Math.atan2(-x, -z), 0);
+  zombie.velocity.set(0, 0, 0);
+  zombie.hp = ZOMBIE_HP;
+  zombie.dead = false;
+  zombie.speed = ZOMBIE_SPEED * (1 + (wave - 1) * 0.09);
+  healthBar.group.visible = true;
+  updateZombieHealthBar();
+}
+
+// ---------------------------------------------------------------------------
 // First-person flashlight + hand (parented to the camera so it follows look).
 // ---------------------------------------------------------------------------
 const handGroup = new THREE.Group();
@@ -297,7 +467,13 @@ scene.add(camera); // ensure camera (and its children) is part of the scene
 let playing = false;
 let dead = false;
 let survived = 0;          // seconds of survival
+let wave = 1;
+let kills = 0;
+let nextFireTime = 0;
 let lastTime = performance.now();
+let recoilImpulse = 0;   // decaying camera pitch kick (radians)
+let recoilApplied = 0;   // recoil currently baked into the camera
+const _recEuler = new THREE.Euler(0, 0, 0, 'YXZ');
 
 // ---------------------------------------------------------------------------
 // Overlay / pointer-lock flow
@@ -319,9 +495,18 @@ function startGame() {
   player.hp = ZOMBIE_HP;
   player.feet.set(0, 0, 0);
   player.velocity.set(0, 0, 0);
+  recoilImpulse = 0;
+  recoilApplied = 0;
+  wave = 1;
+  kills = 0;
   zombie.group.position.set(28, 0, 28);
+  zombie.group.rotation.set(0, Math.atan2(-28, -28), 0);
   zombie.velocity.set(0, 0, 0);
   zombie.hp = ZOMBIE_HP;
+  zombie.dead = false;
+  zombie.speed = ZOMBIE_SPEED;
+  healthBar.group.visible = true;
+  updateZombieHealthBar();
   survived = 0;
   vignette.style.opacity = 0;
   hideOverlay();
@@ -389,10 +574,11 @@ function updateHUD() {
         : 'linear-gradient(90deg,#c0392b,#ff6b5e)';
   hpValue.textContent = `${Math.max(0, Math.round(player.hp))} / ${ZOMBIE_HP}`;
   timerValue.textContent = formatTime(survived);
+  waveValue.textContent = `${wave}`;
   const dx = zombie.group.position.x - player.feet.x;
   const dz = zombie.group.position.z - player.feet.z;
   const dist = Math.hypot(dx, dz);
-  distanceValue.textContent = `${dist.toFixed(1)}m`;
+  distanceValue.textContent = zombie.dead ? '—' : `${dist.toFixed(1)}m`;
 }
 
 // ---------------------------------------------------------------------------
@@ -427,6 +613,14 @@ function update(dt) {
   clampToArena(player.feet);
   camera.position.set(player.feet.x, EYE_HEIGHT, player.feet.z);
 
+  // Recoil: strip last frame's baked pitch, decay the impulse, re-bake the kick.
+  _recEuler.setFromQuaternion(camera.quaternion, 'YXZ');
+  const cleanX = _recEuler.x - recoilApplied;
+  recoilImpulse = Math.max(0, recoilImpulse - dt * 3.0);
+  recoilApplied = recoilImpulse;
+  _recEuler.x = THREE.MathUtils.clamp(cleanX + recoilApplied, -Math.PI / 2, Math.PI / 2);
+  camera.quaternion.setFromEuler(_recEuler);
+
   // --- Attach the flashlight to the camera (follows look + hand) ---
   flashlight.position.copy(camera.position);
   flashlight.target.position.copy(_forward);
@@ -436,51 +630,68 @@ function update(dt) {
   lampGlow.position.y -= 0.2;
 
   // --- Zombie chase ---
-  _toZombie.set(
-    player.feet.x - zombie.group.position.x,
-    0,
-    player.feet.z - zombie.group.position.z
-  );
-  const dist = _toZombie.length();
-  _toZombie.normalize();
+  if (!zombie.dead) {
+    _toZombie.set(
+      player.feet.x - zombie.group.position.x,
+      0,
+      player.feet.z - zombie.group.position.z
+    );
+    const dist = _toZombie.length();
+    _toZombie.normalize();
 
-  // Zombie slowly accelerates up to ZOMBIE_SPEED while it has line of chase.
-  const targetSpeed = ZOMBIE_SPEED * Math.min(1, dist / 6 + 0.4);
-  zombie.velocity.addScaledVector(_toZombie, ZOMBIE_ACCEL * dt * targetSpeed);
-  const vmax = Math.max(zombie.velocity.length(), targetSpeed);
-  if (zombie.velocity.length() > vmax) zombie.velocity.setLength(vmax);
-  // cap the speed
-  if (zombie.velocity.length() > targetSpeed) zombie.velocity.setLength(targetSpeed);
+    // Zombie accelerates up to its current speed while chasing.
+    const targetSpeed = zombie.speed * Math.min(1, dist / 6 + 0.4);
+    zombie.velocity.addScaledVector(_toZombie, ZOMBIE_ACCEL * dt * targetSpeed);
+    if (zombie.velocity.length() > targetSpeed) zombie.velocity.setLength(targetSpeed);
 
-  zombie.group.position.addScaledVector(zombie.velocity, dt);
+    zombie.group.position.addScaledVector(zombie.velocity, dt);
 
-  // Face the player while moving.
-  if (zombie.velocity.lengthSq() > 0.01) {
-    const targetAngle = Math.atan2(_toZombie.x, _toZombie.z);
-    const cur = zombie.group.rotation.y;
-    let delta = targetAngle - cur;
-    while (delta > Math.PI) delta -= Math.PI * 2;
-    while (delta < -Math.PI) delta += Math.PI * 2;
-    zombie.group.rotation.y = cur + delta * Math.min(1, dt * 6);
+    // Face the player while moving.
+    if (zombie.velocity.lengthSq() > 0.01) {
+      const targetAngle = Math.atan2(_toZombie.x, _toZombie.z);
+      const cur = zombie.group.rotation.y;
+      let delta = targetAngle - cur;
+      while (delta > Math.PI) delta -= Math.PI * 2;
+      while (delta < -Math.PI) delta += Math.PI * 2;
+      zombie.group.rotation.y = cur + delta * Math.min(1, dt * 6);
+    }
+
+    // Simple limb shuffle.
+    const t = performance.now() * 0.004;
+    const p = zombie.group.userData.parts;
+    p.armL.rotation.x = Math.sin(t) * 0.7;
+    p.armR.rotation.x = -Math.sin(t) * 0.7;
+    p.legL.rotation.x = -Math.sin(t) * 0.5;
+    p.legR.rotation.x = Math.sin(t) * 0.5;
+    p.head.rotation.x = Math.sin(t * 0.5) * 0.15;
+
+    // Keep the zombie inside the arena too.
+    const zlim = ARENA_HALF - ZOMBIE_RADIUS;
+    zombie.group.position.x = Math.max(-zlim, Math.min(zlim, zombie.group.position.x));
+    zombie.group.position.z = Math.max(-zlim, Math.min(zlim, zombie.group.position.z));
+
+    // Health bar follows and billboards toward the camera.
+    healthBar.group.visible = true;
+    healthBar.group.position.set(zombie.group.position.x, 2.35, zombie.group.position.z);
+    healthBar.group.quaternion.copy(camera.quaternion);
+  } else {
+    // Death: topple over and sink, then respawn a (faster) zombie after a pause.
+    zombie.deathT += dt;
+    zombie.respawnTimer -= dt;
+    const fall = Math.min(1, zombie.deathT / 0.6);
+    zombie.group.rotation.x = (-Math.PI / 2) * fall;
+    zombie.group.position.y = -0.4 * fall;
+    healthBar.group.visible = false;
+    if (zombie.respawnTimer <= 0) respawnZombie();
   }
-
-  // Simple limb shuffle.
-  const t = performance.now() * 0.004;
-  const p = zombie.group.userData.parts;
-  p.armL.rotation.x = Math.sin(t) * 0.7;
-  p.armR.rotation.x = -Math.sin(t) * 0.7;
-  p.legL.rotation.x = -Math.sin(t) * 0.5;
-  p.legR.rotation.x = Math.sin(t) * 0.5;
-  p.head.rotation.x = Math.sin(t * 0.5) * 0.15;
-
-  // Keep the zombie inside the arena too.
-  const zlim = ARENA_HALF - ZOMBIE_RADIUS;
-  zombie.group.position.x = Math.max(-zlim, Math.min(zlim, zombie.group.position.x));
-  zombie.group.position.z = Math.max(-zlim, Math.min(zlim, zombie.group.position.z));
 
   // --- Attack: if the zombie is close enough, bite ---
   zombie.hitTimer = Math.max(0, zombie.hitTimer - dt);
-  if (dist < HIT_RANGE && zombie.hitTimer <= 0) {
+  const atkDist = Math.hypot(
+    zombie.group.position.x - player.feet.x,
+    zombie.group.position.z - player.feet.z
+  );
+  if (!zombie.dead && atkDist < HIT_RANGE && zombie.hitTimer <= 0) {
     player.hp -= ZOMBIE_HIT_DAMAGE;
     zombie.hitTimer = HIT_COOLDOWN;
     // Knock the player back.
@@ -493,6 +704,11 @@ function update(dt) {
   }
 
   if (player.hp <= 0 && !dead) die();
+
+  // Flashlight returns to its resting brightness after a shot.
+  flashlight.intensity += (LIGHT_BASE - flashlight.intensity) * Math.min(1, dt * 25);
+
+  updateEffects(dt);
 
   // --- Survival timer ---
   if (playing && !dead) survived += dt;
@@ -567,6 +783,23 @@ function makeSkyTexture() {
     ctx.fillRect(x, y, s, s);
   }
 
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+// Soft radial glow sprite (for muzzle flash and hit sparks) — generated, no asset.
+function makeGlowTexture() {
+  const size = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  g.addColorStop(0, 'rgba(255,255,255,1)');
+  g.addColorStop(0.25, 'rgba(255,255,255,0.7)');
+  g.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, size, size);
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
