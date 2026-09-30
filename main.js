@@ -29,6 +29,10 @@ const BULLET_DAMAGE = 34;
 const RECOIL = 0.03;           // camera pitch kick per shot
 const LIGHT_BASE = 6;          // resting flashlight intensity
 
+// Waves
+const WAVE_CLEAR_DELAY = 1.8;   // pause before the next wave spawns (seconds)
+const MAX_WAVE_ZOMBIES = 8;     // cap on simultaneous zombies
+
 // ---------------------------------------------------------------------------
 // Renderer / scene / camera
 // ---------------------------------------------------------------------------
@@ -40,6 +44,8 @@ const hpValue = document.getElementById('hpvalue');
 const timerValue = document.getElementById('timer');
 const distanceValue = document.getElementById('distance');
 const waveValue = document.getElementById('wave');
+const zombiesValue = document.getElementById('zombies');
+const banner = document.getElementById('banner');
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
@@ -225,55 +231,46 @@ const player = {
 };
 
 // ---------------------------------------------------------------------------
-// The zombie — a small group of boxes shaped like a shambling figure.
+// Zombies — groups of boxes shaped like shambling figures.
+// Materials are shared across all zombies for performance; geometry is
+// per-zombie and disposed when a wave is cleared.
 // ---------------------------------------------------------------------------
-const zombie = createZombie();
-zombie.group.position.set(28, 0, 28); // start far from the player
-zombie.velocity = new THREE.Vector3();
-zombie.hp = ZOMBIE_HP;
-zombie.hitTimer = 0;
-zombie.speed = ZOMBIE_SPEED;
-zombie.dead = false;
-zombie.deathT = 0;
-zombie.respawnTimer = 0;
-scene.add(zombie.group);
+const ZOMBIE_MAT = {
+  skin: new THREE.MeshStandardMaterial({ color: 0x4f6b45, roughness: 0.95 }),
+  tunic: new THREE.MeshStandardMaterial({ color: 0x2f3a30, roughness: 1.0 }),
+  bone: new THREE.MeshStandardMaterial({ color: 0xd8cdb4, roughness: 0.8 }),
+  eye: new THREE.MeshStandardMaterial({ color: 0x1a0000, emissive: 0xff2a2a, emissiveIntensity: 3 }),
+};
+const zombies = []; // all zombies in the current wave
 
-function createZombie() {
+function createZombieGroup() {
   const group = new THREE.Group();
 
-  const skin = new THREE.MeshStandardMaterial({ color: 0x4f6b45, roughness: 0.95 });
-  const tunic = new THREE.MeshStandardMaterial({ color: 0x2f3a30, roughness: 1.0 });
-  const bone = new THREE.MeshStandardMaterial({ color: 0xd8cdb4, roughness: 0.8 });
-
-  const body = new THREE.Mesh(new THREE.BoxGeometry(0.7, 1.0, 0.42), tunic);
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.7, 1.0, 0.42), ZOMBIE_MAT.tunic);
   body.position.y = 1.05;
   body.castShadow = true;
 
-  const head = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.46, 0.46), skin);
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.46, 0.46), ZOMBIE_MAT.skin);
   head.position.y = 1.75;
   head.castShadow = true;
 
   const armGeo = new THREE.BoxGeometry(0.18, 0.7, 0.18);
-  const armL = new THREE.Mesh(armGeo, skin);
+  const armL = new THREE.Mesh(armGeo, ZOMBIE_MAT.skin);
   armL.position.set(-0.45, 1.15, 0);
   armL.castShadow = true;
-  const armR = new THREE.Mesh(armGeo, skin);
+  const armR = new THREE.Mesh(armGeo, ZOMBIE_MAT.skin);
   armR.position.set(0.45, 1.15, 0);
   armR.castShadow = true;
 
   const legGeo = new THREE.BoxGeometry(0.2, 0.8, 0.2);
-  const legL = new THREE.Mesh(legGeo, tunic);
+  const legL = new THREE.Mesh(legGeo, ZOMBIE_MAT.tunic);
   legL.position.set(-0.18, 0.4, 0);
   legL.castShadow = true;
-  const legR = new THREE.Mesh(legGeo, tunic);
+  const legR = new THREE.Mesh(legGeo, ZOMBIE_MAT.tunic);
   legR.position.set(0.18, 0.4, 0);
   legR.castShadow = true;
 
-  // A single glowing red "eye" so it reads as hostile in the dark.
-  const eye = new THREE.Mesh(
-    new THREE.SphereGeometry(0.05, 8, 8),
-    new THREE.MeshStandardMaterial({ color: 0x1a0000, emissive: 0xff2a2a, emissiveIntensity: 3 })
-  );
+  const eye = new THREE.Mesh(new THREE.SphereGeometry(0.05, 8, 8), ZOMBIE_MAT.eye);
   eye.position.set(0, 1.78, 0.24);
 
   group.add(body, head, armL, armR, legL, legR, eye);
@@ -281,11 +278,8 @@ function createZombie() {
   return group;
 }
 
-// ---------------------------------------------------------------------------
-// Zombie health bar (billboarded above the head; added to the scene directly
-// so it stays upright regardless of the zombie's facing).
-// ---------------------------------------------------------------------------
-const healthBar = (() => {
+// Billboarded health bar for one zombie.
+function createHealthBar() {
   const group = new THREE.Group();
   const W = 0.95, H = 0.13;
   const back = new THREE.Mesh(
@@ -301,9 +295,75 @@ const healthBar = (() => {
   fill.position.set(-W / 2, 0, 0.002);
   group.add(back, fill);
   group.position.set(0, 2.35, 0);
-  return { group, fill };
-})();
-scene.add(healthBar.group);
+  return { group, back, fill };
+}
+
+function makeZombie(x, z, speed) {
+  const group = createZombieGroup();
+  const bar = createHealthBar();
+  group.position.set(x, 0, z);
+  group.rotation.set(0, Math.atan2(-x, -z), 0);
+  scene.add(group);
+  scene.add(bar.group);
+  const zo = {
+    group,
+    healthBar: bar,
+    velocity: new THREE.Vector3(),
+    hp: ZOMBIE_HP,
+    speed,
+    hitTimer: 0,
+    dead: false,
+    deathT: 0,
+  };
+  // Back-reference each mesh to its zombie so raycasts can resolve the target.
+  group.traverse((o) => { if (o.isMesh) o.userData.zombie = zo; });
+  zombies.push(zo);
+  return zo;
+}
+
+function zombieCountFor(w) { return Math.min(w, MAX_WAVE_ZOMBIES); }
+function zombieSpeedFor(w) { return ZOMBIE_SPEED * (1 + (w - 1) * 0.08); }
+
+function spawnWave(w) {
+  const count = zombieCountFor(w);
+  const speed = zombieSpeedFor(w);
+  for (let i = 0; i < count; i++) {
+    const ang = (i / count) * Math.PI * 2 + Math.random() * 0.6;
+    const r = ARENA_HALF - 4;
+    const x = Math.cos(ang) * r;
+    const z = Math.sin(ang) * r;
+    makeZombie(x, z, speed);
+  }
+}
+
+function updateZombieHealthBar(z) {
+  const pct = Math.max(0, z.hp) / ZOMBIE_HP;
+  z.healthBar.fill.scale.x = pct;
+  z.healthBar.fill.material.color.set(pct > 0.5 ? 0x58f0a0 : pct > 0.25 ? 0xffd36e : 0xff5a5e);
+}
+
+function killZombie(z) {
+  if (z.dead) return;
+  z.dead = true;
+  z.deathT = 0;
+  z.hp = 0;
+  z.hitTimer = 0;
+  kills++;
+  updateZombieHealthBar(z);
+}
+
+// Remove every zombie in the current wave (used before spawning the next one
+// and on restart). Shared materials are kept; per-instance geometry is freed.
+function cleanupWave() {
+  for (const z of zombies) {
+    scene.remove(z.group);
+    scene.remove(z.healthBar.group);
+    z.group.traverse((o) => { if (o.isMesh) o.geometry.dispose(); });
+    z.healthBar.back.geometry.dispose();
+    z.healthBar.fill.geometry.dispose();
+  }
+  zombies.length = 0;
+}
 
 // ---------------------------------------------------------------------------
 // Shooting — raycast from the screen centre, with tracer + muzzle flash + spark.
@@ -379,12 +439,12 @@ function shoot() {
 
   raycaster.setFromCamera(centerNDC, camera);
   const targets = [];
-  zombie.group.traverse((o) => { if (o.isMesh) targets.push(o); });
+  for (const z of zombies) z.group.traverse((o) => { if (o.isMesh) targets.push(o); });
   const hits = raycaster.intersectObjects(targets, false);
-  const hitPoint = hits.length ? hits[0].point : null;
+  const firstHit = hits.length ? hits[0] : null;
 
-  const end = hitPoint
-    ? hitPoint
+  const end = firstHit
+    ? firstHit.point
     : camera.getWorldDirection(_shootDir).clone().multiplyScalar(80).add(camera.position);
   spawnTracer(muzzle, end);
   spawnMuzzleFlash(muzzle);
@@ -393,41 +453,15 @@ function shoot() {
   recoilImpulse = Math.min(0.14, recoilImpulse + RECOIL);
   flashlight.intensity = LIGHT_BASE + 6;
 
-  if (hitPoint && !zombie.dead) {
-    zombie.hp -= BULLET_DAMAGE;
-    updateZombieHealthBar();
-    spawnHitSpark(hitPoint);
-    if (zombie.hp <= 0) killZombie();
+  if (firstHit) {
+    const z = firstHit.object.userData.zombie;
+    if (z && !z.dead) {
+      z.hp -= BULLET_DAMAGE;
+      updateZombieHealthBar(z);
+      spawnHitSpark(firstHit.point);
+      if (z.hp <= 0) killZombie(z);
+    }
   }
-}
-function updateZombieHealthBar() {
-  const pct = Math.max(0, zombie.hp) / ZOMBIE_HP;
-  healthBar.fill.scale.x = pct;
-  healthBar.fill.material.color.set(pct > 0.5 ? 0x58f0a0 : pct > 0.25 ? 0xffd36e : 0xff5a5e);
-}
-function killZombie() {
-  if (zombie.dead) return;
-  zombie.dead = true;
-  zombie.deathT = 0;
-  zombie.respawnTimer = 1.6;
-  zombie.hp = 0;
-  kills++;
-  updateZombieHealthBar();
-}
-function respawnZombie() {
-  wave++;
-  const ang = Math.random() * Math.PI * 2;
-  const r = ARENA_HALF - 4;
-  const x = Math.cos(ang) * r;
-  const z = Math.sin(ang) * r;
-  zombie.group.position.set(x, 0, z);
-  zombie.group.rotation.set(0, Math.atan2(-x, -z), 0);
-  zombie.velocity.set(0, 0, 0);
-  zombie.hp = ZOMBIE_HP;
-  zombie.dead = false;
-  zombie.speed = ZOMBIE_SPEED * (1 + (wave - 1) * 0.09);
-  healthBar.group.visible = true;
-  updateZombieHealthBar();
 }
 
 // ---------------------------------------------------------------------------
@@ -470,6 +504,7 @@ let survived = 0;          // seconds of survival
 let wave = 1;
 let kills = 0;
 let nextFireTime = 0;
+let waveDelay = 0;         // counts up while the current wave is fully cleared
 let lastTime = performance.now();
 let recoilImpulse = 0;   // decaying camera pitch kick (radians)
 let recoilApplied = 0;   // recoil currently baked into the camera
@@ -489,6 +524,14 @@ function hideOverlay() {
   overlay.classList.add('hidden');
 }
 
+function showBanner(text) {
+  if (!banner) return;
+  banner.textContent = text;
+  banner.classList.remove('show');
+  void banner.offsetWidth; // restart the CSS animation
+  banner.classList.add('show');
+}
+
 function startGame() {
   dead = false;
   playing = true;
@@ -499,17 +542,13 @@ function startGame() {
   recoilApplied = 0;
   wave = 1;
   kills = 0;
-  zombie.group.position.set(28, 0, 28);
-  zombie.group.rotation.set(0, Math.atan2(-28, -28), 0);
-  zombie.velocity.set(0, 0, 0);
-  zombie.hp = ZOMBIE_HP;
-  zombie.dead = false;
-  zombie.speed = ZOMBIE_SPEED;
-  healthBar.group.visible = true;
-  updateZombieHealthBar();
+  waveDelay = 0;
+  cleanupWave();
+  spawnWave(wave);
   survived = 0;
   vignette.style.opacity = 0;
   hideOverlay();
+  showBanner('WAVE 1');
   controls.lock();
 }
 
@@ -541,7 +580,7 @@ function die() {
   const t = formatTime(survived);
   showOverlay(
     '<span id="dead-title">YOU DIED</span>',
-    `The zombie got you after <b>${t}</b> of survival.`
+    `The horde got you on <b>Wave ${wave}</b> after <b>${t}</b>.<br/>You killed <b>${kills}</b> zombie${kills === 1 ? '' : 's'}.`
   );
 }
 
@@ -575,10 +614,17 @@ function updateHUD() {
   hpValue.textContent = `${Math.max(0, Math.round(player.hp))} / ${ZOMBIE_HP}`;
   timerValue.textContent = formatTime(survived);
   waveValue.textContent = `${wave}`;
-  const dx = zombie.group.position.x - player.feet.x;
-  const dz = zombie.group.position.z - player.feet.z;
-  const dist = Math.hypot(dx, dz);
-  distanceValue.textContent = zombie.dead ? '—' : `${dist.toFixed(1)}m`;
+
+  let nearest = Infinity;
+  let alive = 0;
+  for (const z of zombies) {
+    if (z.dead) continue;
+    alive++;
+    const d = Math.hypot(z.group.position.x - player.feet.x, z.group.position.z - player.feet.z);
+    if (d < nearest) nearest = d;
+  }
+  distanceValue.textContent = alive === 0 ? '—' : `${nearest.toFixed(1)}m`;
+  zombiesValue.textContent = `${alive}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -629,81 +675,93 @@ function update(dt) {
   lampGlow.position.copy(camera.position).addScaledVector(_forward, 0.3);
   lampGlow.position.y -= 0.2;
 
-  // --- Zombie chase ---
-  if (!zombie.dead) {
-    _toZombie.set(
-      player.feet.x - zombie.group.position.x,
-      0,
-      player.feet.z - zombie.group.position.z
-    );
-    const dist = _toZombie.length();
-    _toZombie.normalize();
+  // --- Zombies: chase, attack, die ---
+  let anyAlive = false;
+  for (let i = 0; i < zombies.length; i++) {
+    const z = zombies[i];
+    if (!z.dead) {
+      anyAlive = true;
+      _toZombie.set(
+        player.feet.x - z.group.position.x,
+        0,
+        player.feet.z - z.group.position.z
+      );
+      const dist = _toZombie.length();
+      _toZombie.normalize();
 
-    // Zombie accelerates up to its current speed while chasing.
-    const targetSpeed = zombie.speed * Math.min(1, dist / 6 + 0.4);
-    zombie.velocity.addScaledVector(_toZombie, ZOMBIE_ACCEL * dt * targetSpeed);
-    if (zombie.velocity.length() > targetSpeed) zombie.velocity.setLength(targetSpeed);
+      // Accelerate up to this zombie's speed while chasing.
+      const targetSpeed = z.speed * Math.min(1, dist / 6 + 0.4);
+      z.velocity.addScaledVector(_toZombie, ZOMBIE_ACCEL * dt * targetSpeed);
+      if (z.velocity.length() > targetSpeed) z.velocity.setLength(targetSpeed);
 
-    zombie.group.position.addScaledVector(zombie.velocity, dt);
+      z.group.position.addScaledVector(z.velocity, dt);
 
-    // Face the player while moving.
-    if (zombie.velocity.lengthSq() > 0.01) {
-      const targetAngle = Math.atan2(_toZombie.x, _toZombie.z);
-      const cur = zombie.group.rotation.y;
-      let delta = targetAngle - cur;
-      while (delta > Math.PI) delta -= Math.PI * 2;
-      while (delta < -Math.PI) delta += Math.PI * 2;
-      zombie.group.rotation.y = cur + delta * Math.min(1, dt * 6);
+      // Face the player while moving.
+      if (z.velocity.lengthSq() > 0.01) {
+        const targetAngle = Math.atan2(_toZombie.x, _toZombie.z);
+        const cur = z.group.rotation.y;
+        let delta = targetAngle - cur;
+        while (delta > Math.PI) delta -= Math.PI * 2;
+        while (delta < -Math.PI) delta += Math.PI * 2;
+        z.group.rotation.y = cur + delta * Math.min(1, dt * 6);
+      }
+
+      // Simple limb shuffle (per-zombie phase so they don't move in unison).
+      const t = performance.now() * 0.004 + i * 1.7;
+      const p = z.group.userData.parts;
+      p.armL.rotation.x = Math.sin(t) * 0.7;
+      p.armR.rotation.x = -Math.sin(t) * 0.7;
+      p.legL.rotation.x = -Math.sin(t) * 0.5;
+      p.legR.rotation.x = Math.sin(t) * 0.5;
+      p.head.rotation.x = Math.sin(t * 0.5) * 0.15;
+
+      // Keep the zombie inside the arena.
+      const zlim = ARENA_HALF - ZOMBIE_RADIUS;
+      z.group.position.x = Math.max(-zlim, Math.min(zlim, z.group.position.x));
+      z.group.position.z = Math.max(-zlim, Math.min(zlim, z.group.position.z));
+
+      // Health bar follows and billboards toward the camera.
+      z.healthBar.group.visible = true;
+      z.healthBar.group.position.set(z.group.position.x, 2.35, z.group.position.z);
+      z.healthBar.group.quaternion.copy(camera.quaternion);
+
+      // Attack: bite when close.
+      z.hitTimer = Math.max(0, z.hitTimer - dt);
+      if (dist < HIT_RANGE && z.hitTimer <= 0) {
+        player.hp -= ZOMBIE_HIT_DAMAGE;
+        z.hitTimer = HIT_COOLDOWN;
+        player.velocity.addScaledVector(_toZombie, -ZOMBIE_KNOCKBACK);
+        vignette.style.opacity = 0.9;
+        setTimeout(() => { if (!dead) vignette.style.opacity = Math.max(0, 1 - player.hp / ZOMBIE_HP) * 0.5; }, 120);
+      }
+    } else {
+      // Death: topple over and sink.
+      z.deathT += dt;
+      const fall = Math.min(1, z.deathT / 0.6);
+      z.group.rotation.x = (-Math.PI / 2) * fall;
+      z.group.position.y = -0.4 * fall;
+      z.healthBar.group.visible = false;
     }
-
-    // Simple limb shuffle.
-    const t = performance.now() * 0.004;
-    const p = zombie.group.userData.parts;
-    p.armL.rotation.x = Math.sin(t) * 0.7;
-    p.armR.rotation.x = -Math.sin(t) * 0.7;
-    p.legL.rotation.x = -Math.sin(t) * 0.5;
-    p.legR.rotation.x = Math.sin(t) * 0.5;
-    p.head.rotation.x = Math.sin(t * 0.5) * 0.15;
-
-    // Keep the zombie inside the arena too.
-    const zlim = ARENA_HALF - ZOMBIE_RADIUS;
-    zombie.group.position.x = Math.max(-zlim, Math.min(zlim, zombie.group.position.x));
-    zombie.group.position.z = Math.max(-zlim, Math.min(zlim, zombie.group.position.z));
-
-    // Health bar follows and billboards toward the camera.
-    healthBar.group.visible = true;
-    healthBar.group.position.set(zombie.group.position.x, 2.35, zombie.group.position.z);
-    healthBar.group.quaternion.copy(camera.quaternion);
-  } else {
-    // Death: topple over and sink, then respawn a (faster) zombie after a pause.
-    zombie.deathT += dt;
-    zombie.respawnTimer -= dt;
-    const fall = Math.min(1, zombie.deathT / 0.6);
-    zombie.group.rotation.x = (-Math.PI / 2) * fall;
-    zombie.group.position.y = -0.4 * fall;
-    healthBar.group.visible = false;
-    if (zombie.respawnTimer <= 0) respawnZombie();
   }
-
-  // --- Attack: if the zombie is close enough, bite ---
-  zombie.hitTimer = Math.max(0, zombie.hitTimer - dt);
-  const atkDist = Math.hypot(
-    zombie.group.position.x - player.feet.x,
-    zombie.group.position.z - player.feet.z
-  );
-  if (!zombie.dead && atkDist < HIT_RANGE && zombie.hitTimer <= 0) {
-    player.hp -= ZOMBIE_HIT_DAMAGE;
-    zombie.hitTimer = HIT_COOLDOWN;
-    // Knock the player back.
-    player.velocity.addScaledVector(_toZombie, -ZOMBIE_KNOCKBACK);
-    // Flash the vignette.
-    vignette.style.opacity = 0.9;
-    setTimeout(() => { if (!dead) vignette.style.opacity = Math.max(0, 1 - player.hp / ZOMBIE_HP) * 0.5; }, 120);
-  } else {
+  if (!anyAlive) {
     vignette.style.opacity = Math.max(0, 1 - player.hp / ZOMBIE_HP) * 0.5;
   }
 
   if (player.hp <= 0 && !dead) die();
+
+  // --- Wave transition: when the wave is cleared, spawn a bigger, faster one ---
+  if (anyAlive) {
+    waveDelay = 0;
+  } else {
+    waveDelay += dt;
+    if (waveDelay >= WAVE_CLEAR_DELAY) {
+      waveDelay = 0;
+      wave++;
+      cleanupWave();
+      spawnWave(wave);
+      showBanner('WAVE ' + wave);
+    }
+  }
 
   // Flashlight returns to its resting brightness after a shot.
   flashlight.intensity += (LIGHT_BASE - flashlight.intensity) * Math.min(1, dt * 25);
@@ -727,11 +785,14 @@ function animate() {
 
   if (controls.isLocked && playing) update(dt);
   else if (!dead) {
-    // Idle: still animate the zombie's limbs so the scene feels alive.
+    // Idle: still animate the zombies' limbs so the scene feels alive.
     const t = performance.now() * 0.004;
-    const p = zombie.group.userData.parts;
-    p.armL.rotation.x = Math.sin(t * 0.4) * 0.3;
-    p.armR.rotation.x = -Math.sin(t * 0.4) * 0.3;
+    for (let i = 0; i < zombies.length; i++) {
+      const p = zombies[i].group.userData.parts;
+      const ph = t * 0.4 + i * 1.7;
+      p.armL.rotation.x = Math.sin(ph) * 0.3;
+      p.armR.rotation.x = -Math.sin(ph) * 0.3;
+    }
   }
 
   updateHUD();

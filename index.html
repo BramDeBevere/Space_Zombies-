@@ -52,6 +52,16 @@
       transition: opacity 0.2s; }
     #hint { position: fixed; bottom: 12px; left: 0; right: 0; text-align: center; z-index: 5;
       color: #5a6a80; font-size: 12px; letter-spacing: 1px; pointer-events: none; }
+    #banner { position: fixed; top: 38%; left: 0; right: 0; text-align: center; z-index: 6;
+      pointer-events: none; font-size: 42px; font-weight: 800; letter-spacing: 6px;
+      color: #eaf1fb; text-shadow: 0 0 22px rgba(120,180,255,0.6); opacity: 0; }
+    #banner.show { animation: banner 1.6s ease-out forwards; }
+    @keyframes banner {
+      0% { opacity: 0; transform: scale(0.85); }
+      20% { opacity: 1; transform: scale(1); }
+      75% { opacity: 1; }
+      100% { opacity: 0; transform: scale(1.05); }
+    }
   </style>
 
   <!-- Pinned Three.js via a CDN import map (no npm, no local copies). -->
@@ -85,14 +95,19 @@
       <span class="label">Wave</span>
       <span class="value" id="wave">1</span>
     </div>
+    <div class="stat">
+      <span class="label">Zombies</span>
+      <span class="value" id="zombies">1</span>
+    </div>
   </div>
 
   <div id="vignette"></div>
-  <div id="hint">WASD move &middot; mouse look &middot; Shift run &middot; Esc release cursor</div>
+  <div id="banner"></div>
+  <div id="hint">WASD move &middot; mouse look &middot; Shift run &middot; Click shoot &middot; Esc release cursor</div>
 
   <div id="overlay">
     <h1>DEAD<span class="sub"> ARENA</span></h1>
-    <p>You are alone in a night arena. A zombie is hunting you.<br />Shoot it before it gets close — it gets faster every wave.</p>
+    <p>You are alone in a night arena. Survive the waves — each one brings more, faster zombies.<br />Shoot them before they reach you.</p>
     <div class="keys">
       <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd>
       <span style="align-self:center;color:#5a6a80">move</span>
