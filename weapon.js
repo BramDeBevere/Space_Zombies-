@@ -3,12 +3,13 @@
 import * as THREE from 'three';
 import { camera, scene } from './world.js';
 import { zombies, updateZombieHealthBar, killZombie } from './zombie.js';
+import { sfxShot, sfxKill } from './sound.js';
 
 // --- Tunable constants (shooting) ---
 export const FIRE_COOLDOWN = 0.18;   // seconds between shots
-const BULLET_DAMAGE = 34;
+export const BULLET_DAMAGE = 34;
 export const RECOIL = 0.03;          // camera pitch kick per shot
-export const LIGHT_BASE = 6;         // resting flashlight intensity
+export const LIGHT_BASE = 8;         // resting flashlight intensity
 
 const raycaster = new THREE.Raycaster();
 const centerNDC = new THREE.Vector2(0, 0);
@@ -118,17 +119,50 @@ export let recoilApplied = 0;   // recoil currently baked into the camera
 const _recEuler = new THREE.Euler(0, 0, 0, 'YXZ');
 let nextFireTime = 0;
 
+// --- Viewmodel sway/bob — the gun eases with movement instead of staying rigid ---
+const HAND_BASE = { x: 0.34, y: -0.34, z: -0.6 }; // resting offset from the camera
+let swayX = 0, swayY = 0, swayZ = 0, swayRoll = 0;
+let bobPhase = 0;
+
 /**
- * Attach the flashlight + lamp glow to the current view direction.
+ * Attach the flashlight + lamp glow to the current view direction and ease the
+ * hand toward its rest position with a subtle sway/bob driven by movement.
  * forward: world-oriented, y=0, normalised Vector3.
+ * lateral/forward: camera-relative horizontal velocity (units/s), speed its magnitude.
  */
-export function updateWeaponRig(forward) {
+export function updateWeaponRig(forward, lateral = 0, forwardMove = 0, speed = 0, dt = 0, onGround = true) {
   flashlight.position.copy(camera.position);
   flashlight.target.position.copy(forward);
   flashlight.target.position.addScaledVector(forward, 10);
   flashlight.target.position.y -= 0.2;
   lampGlow.position.copy(camera.position).addScaledVector(forward, 0.3);
   lampGlow.position.y -= 0.2;
+
+  // Targets for the sway: the gun drifts away from the direction of travel
+  // and sinks a touch when moving — a small, natural-looking lag.
+  const tx = -lateral * 0.012;
+  const ty = -forwardMove * 0.012 - Math.min(speed, 10) * 0.006;
+  const tz = -forwardMove * 0.004;
+  const roll = lateral * 0.012;
+  const k = 1 - Math.exp(-dt * 12); // frame-rate-independent easing
+  swayX += (tx - swayX) * k;
+  swayY += (ty - swayY) * k;
+  swayZ += (tz - swayZ) * k;
+  swayRoll += (roll - swayRoll) * k;
+
+  // Step bob: a gentle vertical/longitudinal bob while walking on the ground.
+  let bobY = 0, bobX = 0;
+  if (onGround && speed > 0.4) {
+    bobPhase += dt * (5 + speed * 0.8);
+    bobY = Math.sin(bobPhase * 2) * 0.012 * Math.min(1, speed / 4);
+    bobX = Math.cos(bobPhase) * 0.008 * Math.min(1, speed / 4);
+  } else if (speed <= 0.4) {
+    // Still: ease the bob phase out so it doesn't resume mid-swing.
+    bobPhase *= 1 - k;
+  }
+
+  handGroup.position.set(HAND_BASE.x + swayX + bobX, HAND_BASE.y + swayY + bobY, HAND_BASE.z + swayZ);
+  handGroup.rotation.z = swayRoll;
 }
 
 /**
@@ -162,6 +196,8 @@ export function shoot(onKill) {
     : camera.getWorldDirection(_shootDir).clone().multiplyScalar(80).add(camera.position);
   spawnTracer(muzzle, end);
   spawnMuzzleFlash(muzzle);
+  sfxShot();
+  if (fireNet) fireNet(muzzle, end);
 
   // Recoil impulse + light spike (the kick is baked into the camera per-frame).
   recoilImpulse = Math.min(0.14, recoilImpulse + RECOIL);
@@ -173,17 +209,21 @@ export function shoot(onKill) {
       z.hp -= BULLET_DAMAGE;
       updateZombieHealthBar(z);
       spawnHitSpark(firstHit.point);
-      if (z.hp <= 0) { killZombie(z); if (onKill) onKill(); }
+      if (z.hp <= 0) { killZombie(z); sfxKill(); if (onKill) onKill(); }
     }
   }
 }
 
 // --- Fire throttling + recoil reset (called by the input handler / on start) ---
-export function tryFire(onKill) {
+let fireNet = null; // optional callback(ox,oy,oz,ex,ey,ez) — broadcast the shot
+export function setFireNet(fn) { fireNet = fn; }
+
+export function tryFire(onKill, shootOverride) {
   const now = performance.now();
   if (now < nextFireTime) return false;
   nextFireTime = now + FIRE_COOLDOWN * 1000;
-  shoot(onKill);
+  shoot(onKill); // local visuals + (if wired) broadcast via setFireNet
+  if (shootOverride) shootOverride();
   return true;
 }
 export function resetFire() { nextFireTime = 0; }

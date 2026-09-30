@@ -44,7 +44,40 @@
       color: #eaf1fb; font-weight: 700; font-family: inherit; }
     #overlay .cta { margin-top: 18px; font-size: 18px; color: #8fd0ff; letter-spacing: 1px;
       animation: pulse 1.6s ease-in-out infinite; }
+    #overlay .modes { display: flex; gap: 12px; margin: 18px 0 4px; flex-wrap: wrap; justify-content: center; }
+    #overlay .mode { min-width: 150px; padding: 14px 20px; border-radius: 12px; cursor: pointer;
+      border: 1px solid rgba(255,255,255,0.2); background: rgba(255,255,255,0.05); transition: all 0.15s; }
+    #overlay .mode:hover { background: rgba(255,255,255,0.1); }
+    #overlay .mode .t { display: block; font-size: 18px; font-weight: 700; color: #eaf1fb; margin-bottom: 3px; }
+    #overlay .mode .d { display: block; font-size: 12px; color: #7f8fa3; line-height: 1.4; }
     @keyframes pulse { 0%, 100% { opacity: 0.5; } 50% { opacity: 1; } }
+
+    /* Multiplayer lobby (create / join by room code) */
+    #overlay .modes.hidden, #overlay .multi.hidden { display: none; }
+    #overlay .multi { display: flex; flex-direction: column; gap: 12px; align-items: center;
+      margin: 14px 0 4px; min-width: 260px; }
+    #overlay .room-opts { display: flex; flex-direction: column; gap: 10px; align-items: center; }
+    #overlay .room-opts.hidden { display: none; }
+    #overlay .btn { padding: 10px 18px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.25);
+      background: rgba(255,255,255,0.06); color: #eaf1fb; font: inherit; font-weight: 700;
+      cursor: pointer; transition: all 0.15s; }
+    #overlay .btn:hover { background: rgba(255,255,255,0.14); }
+    #overlay .btn.primary { background: #2f7fd0; border-color: #2f7fd0; color: #fff; }
+    #overlay .btn.primary:hover { background: #3a90e8; }
+    #overlay .btn.ghost { background: transparent; color: #8ea0b6; }
+    #overlay .join-row { display: flex; gap: 8px; align-items: center; }
+    #overlay .code-input { width: 140px; padding: 10px 12px; border-radius: 10px;
+      border: 1px solid rgba(255,255,255,0.25); background: rgba(0,0,0,0.4); color: #eaf1fb;
+      font: inherit; font-weight: 700; letter-spacing: 4px; text-transform: uppercase; text-align: center; }
+    #overlay .code-input:focus { outline: none; border-color: #58c7ff; }
+    #overlay .room-ready { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+    #overlay .room-ready.hidden { display: none; }
+    #overlay .room-code-label { font-size: 11px; letter-spacing: 2px; text-transform: uppercase; color: #6f7f95; }
+    #overlay .room-code { font-size: 40px; font-weight: 800; letter-spacing: 8px; color: #58c7ff;
+      cursor: pointer; padding: 6px 18px; border-radius: 10px;
+      border: 1px dashed rgba(120,200,255,0.4); user-select: all; }
+    #overlay .room-hint { font-size: 12px; color: #7f8fa3; }
+    #overlay .room-status { font-size: 13px; color: #ffd36e; min-height: 18px; }
 
     #dead-title { color: #ff5a6e !important; text-shadow: 0 0 24px rgba(255,70,90,0.6) !important; }
     #vignette { position: fixed; inset: 0; pointer-events: none; z-index: 4; opacity: 0;
@@ -73,6 +106,10 @@
     }
   }
   </script>
+
+  <!-- PeerJS: free public signaling so room-code multiplayer works on any static
+       host (Netlify/Vercel). Loaded as a global before the game modules. -->
+  <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.2/dist/peerjs.min.js"></script>
 </head>
 <body>
   <div id="app"></div>
@@ -99,27 +136,92 @@
       <span class="label">Zombies</span>
       <span class="value" id="zombies">1</span>
     </div>
+    <div class="stat" id="players-stat" style="display:none">
+      <span class="label">Players</span>
+      <span class="value" id="players">1</span>
+    </div>
   </div>
 
   <div id="vignette"></div>
   <div id="banner"></div>
-  <div id="hint">WASD move &middot; mouse look &middot; Shift run &middot; Click shoot &middot; Esc release cursor</div>
+  <div id="hint">WASD move &middot; mouse look &middot; Shift run &middot; Space jump &middot; Click shoot &middot; Esc release cursor</div>
 
   <div id="overlay">
     <h1>DEAD<span class="sub"> ARENA</span></h1>
-    <p>You are alone in a night arena. Survive the waves — each one brings more, faster zombies.<br />Shoot them before they reach you.</p>
+    <p id="overlay-desc">You are alone in a night arena. Survive the waves — each one brings more, faster zombies.<br />Shoot them before they reach you.</p>
+    <div class="modes" id="mode-row">
+      <div class="mode" data-mode="solo">
+        <span class="t">Solo</span>
+        <span class="d">Fight the zombie waves on your own.</span>
+      </div>
+      <div class="mode" data-mode="multi">
+        <span class="t">Multiplayer</span>
+        <span class="d">Create a room, share the code, and meet other players in the same arena.</span>
+      </div>
+    </div>
+
+    <div class="multi hidden" id="multi">
+      <div class="room-opts" id="room-opts">
+        <button class="btn primary" id="room-create">Create room</button>
+        <div class="join-row">
+          <input class="code-input" id="room-code-input" maxlength="5" placeholder="CODE" autocomplete="off" spellcheck="false" />
+          <button class="btn" id="room-join">Join room</button>
+        </div>
+        <button class="btn ghost" id="room-back">&larr; Back</button>
+      </div>
+      <div class="room-ready hidden" id="room-ready">
+        <div class="room-code-label">Room code</div>
+        <div class="room-code" id="room-code" title="Click to copy">------</div>
+        <div class="room-hint" id="room-hint">Share this code — a friend types it in to join.</div>
+      </div>
+      <div class="room-status" id="room-status"></div>
+    </div>
     <div class="keys">
       <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd>
       <span style="align-self:center;color:#5a6a80">move</span>
       <kbd>Shift</kbd>
       <span style="align-self:center;color:#5a6a80">sprint</span>
+      <kbd>Space</kbd>
+      <span style="align-self:center;color:#5a6a80">jump</span>
       <kbd>Click</kbd>
       <span style="align-self:center;color:#5a6a80">shoot</span>
       <kbd>Mouse</kbd>
       <span style="align-self:center;color:#5a6a80">look</span>
     </div>
-    <div class="cta">Click to play</div>
+    <div class="cta" id="cta">Click to play</div>
   </div>
+
+  <!-- Non-module fallback: if the game modules fail or hang, say why instead of
+       leaving a silent blank page. Runs even when main.js errors out. -->
+  <script>
+    (function () {
+      var note = document.getElementById('overlay');
+      function fail(msg) {
+        if (window.__appReady || !note) return;
+        var el = document.createElement('div');
+        el.style.cssText = 'margin-top:16px;max-width:560px;padding:12px 16px;' +
+          'border:1px solid rgba(255,80,90,.5);border-radius:10px;background:rgba(60,10,14,.55);' +
+          'color:#ffd7dc;font-size:13px;line-height:1.5;text-align:left;white-space:pre-line;';
+        el.textContent = msg;
+        note.appendChild(el);
+      }
+      window.addEventListener('error', function (e) {
+        var m = (e.error && e.error.message) ? e.error.message : e.message;
+        if (m) fail('Load error: ' + m + '\nOpen the browser console (F12) for the full trace.');
+      });
+      window.addEventListener('unhandledrejection', function (e) {
+        fail('Load error: ' + (e.reason && e.reason.message ? e.reason.message : e.reason));
+      });
+      setTimeout(function () {
+        if (!window.__appReady) {
+          fail('Still loading…\n' +
+            '• Open it over http:// — do NOT double-click the .html file (ES modules are blocked under file://).\n' +
+            '• Serve the folder:  python3 -m http.server   (or  node server.js)  → then open the printed URL.\n' +
+            '• The page loads Three.js + PeerJS from CDNs, so it needs an internet connection. Check the console (F12).');
+        }
+      }, 5000);
+    })();
+  </script>
 
   <script type="module" src="./main.js"></script>
 </body>

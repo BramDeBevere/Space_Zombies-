@@ -9,11 +9,68 @@ const timerValue = document.getElementById('timer');
 const distanceValue = document.getElementById('distance');
 const waveValue = document.getElementById('wave');
 const zombiesValue = document.getElementById('zombies');
+const playersValue = document.getElementById('players');
 const banner = document.getElementById('banner');
+const modeSolo = document.querySelector('#overlay [data-mode="solo"]');
+const modeMulti = document.querySelector('#overlay [data-mode="multi"]');
+const modeRow = document.getElementById('mode-row');
+const overlayDesc = document.getElementById('overlay-desc');
+const cta = document.getElementById('cta');
+const multi = document.getElementById('multi');
+const roomOpts = document.getElementById('room-opts');
+const roomReady = document.getElementById('room-ready');
+const roomCode = document.getElementById('room-code');
+const roomHint = document.getElementById('room-hint');
+const roomStatus = document.getElementById('room-status');
+const codeInput = document.getElementById('room-code-input');
 
 let isDead = false;
+let modePickCb = null;   // set by main.js: picks solo/multi on the start screen
+let roomActionCb = null; // set by main.js: handles create/join/back
 
 export function setDead(dead) { isDead = dead; }
+export function onModePick(fn) { modePickCb = fn; }
+export function onRoomAction(fn) { roomActionCb = fn; }
+if (modeSolo) modeSolo.addEventListener('click', (e) => { e.stopPropagation(); modePickCb && modePickCb('solo'); });
+if (modeMulti) modeMulti.addEventListener('click', (e) => { e.stopPropagation(); modePickCb && modePickCb('multi'); });
+if (document.getElementById('room-create')) document.getElementById('room-create').addEventListener('click', (e) => { e.stopPropagation(); roomActionCb && roomActionCb('create'); });
+if (document.getElementById('room-join')) document.getElementById('room-join').addEventListener('click', (e) => { e.stopPropagation(); const v = codeInput ? codeInput.value : ''; roomActionCb && roomActionCb('join', v); });
+if (document.getElementById('room-back')) document.getElementById('room-back').addEventListener('click', (e) => { e.stopPropagation(); roomActionCb && roomActionCb('back'); });
+if (roomCode) roomCode.addEventListener('click', (e) => { e.stopPropagation(); if (navigator.clipboard) navigator.clipboard.writeText(roomCode.textContent || ''); });
+if (codeInput) codeInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); roomActionCb && roomActionCb('join', codeInput.value); }
+  if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); roomActionCb && roomActionCb('back'); }
+});
+
+/** Show the multiplayer lobby (create / join by room code). */
+export function showMultiLobby() {
+  if (modeRow) modeRow.classList.add('hidden');
+  if (multi) multi.classList.remove('hidden');
+  if (overlayDesc) overlayDesc.innerHTML = 'Create a room or enter a code to join a friend.';
+  if (roomOpts) roomOpts.classList.remove('hidden');
+  if (roomReady) roomReady.classList.add('hidden');
+  if (roomStatus) roomStatus.textContent = '';
+  if (codeInput) { codeInput.value = ''; codeInput.focus(); }
+  if (cta) cta.textContent = '';
+}
+/** Hide the lobby and restore the normal start screen. */
+export function hideMultiLobby() {
+  if (multi) multi.classList.add('hidden');
+  if (modeRow) modeRow.classList.remove('hidden');
+  if (cta) cta.textContent = 'Click to play';
+}
+export function setRoomCode(code) {
+  if (!roomCode) return;
+  roomCode.textContent = code;
+  if (roomReady) roomReady.classList.remove('hidden');
+  if (roomOpts) roomOpts.classList.add('hidden');
+  if (roomHint) roomHint.textContent = 'Share this code — a friend types it in to join.';
+}
+export function setRoomStatus(msg) { if (roomStatus) roomStatus.textContent = msg || ''; }
+export function showPlayWaiting() {
+  if (cta) cta.textContent = 'Click to play';
+  if (roomStatus) roomStatus.textContent = 'Waiting for a friend to join…';
+}
 
 export function formatTime(s) {
   const m = Math.floor(s / 60);
@@ -25,7 +82,8 @@ export function showOverlay(title, sub) {
   overlay.querySelector('h1').innerHTML = title;
   const p = overlay.querySelector('p');
   if (p) p.innerHTML = sub;
-  overlay.querySelector('.cta').textContent = isDead ? 'Click to try again' : 'Click to play';
+const cta = overlay.querySelector('.cta');
+    if (cta) cta.textContent = isDead ? 'Click to try again' : 'Click to play';
   overlay.classList.remove('hidden');
 }
 
@@ -58,6 +116,7 @@ export function updateHUD(stats) {
   waveValue.textContent = `${stats.wave}`;
   distanceValue.textContent = stats.alive === 0 ? '—' : `${stats.nearest.toFixed(1)}m`;
   zombiesValue.textContent = `${stats.alive}`;
+  if (stats.players != null) playersValue.textContent = `${stats.players}`;
 }
 
 /**

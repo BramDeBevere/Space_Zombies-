@@ -1,6 +1,6 @@
 // Zombies — the horde. Building, spawning waves, chasing, dying and cleanup.
 import * as THREE from 'three';
-import { ARENA_HALF, scene } from './world.js';
+import { ARENA_HALF, scene, obstacles } from './world.js';
 
 // --- Tunable constants (zombies) ---
 const ZOMBIE_RADIUS = 0.6;
@@ -26,6 +26,45 @@ const ZOMBIE_MAT = {
 };
 const zombies = []; // all zombies in the current wave
 const _toZombie = new THREE.Vector3();
+let zidCounter = 0; // stable ids so the host can stream + joiners can track zombies
+
+// Push a zombie out of any obstacle: a circle ({r}) or an axis-aligned box
+// ({box:true, halfX, halfZ}) so the horde slides around cover.
+function resolveZombieObstacles(pos) {
+  for (const o of obstacles) {
+    if (o.box) {
+      const nx = Math.max(o.x - o.halfX, Math.min(pos.x, o.x + o.halfX));
+      const nz = Math.max(o.z - o.halfZ, Math.min(pos.z, o.z + o.halfZ));
+      const dx = pos.x - nx, dz = pos.z - nz;
+      const d2 = dx * dx + dz * dz;
+      if (d2 < ZOMBIE_RADIUS * ZOMBIE_RADIUS) {
+        if (d2 > 1e-8) {
+          const d = Math.sqrt(d2);
+          pos.x = nx + (dx / d) * ZOMBIE_RADIUS;
+          pos.z = nz + (dz / d) * ZOMBIE_RADIUS;
+        } else {
+          const dw = pos.x - (o.x - o.halfX), de = (o.x + o.halfX) - pos.x;
+          const dn = pos.z - (o.z - o.halfZ), ds = (o.z + o.halfZ) - pos.z;
+          const m = Math.min(dw, de, dn, ds);
+          if (m === dw) pos.x = o.x - o.halfX - ZOMBIE_RADIUS;
+          else if (m === de) pos.x = o.x + o.halfX + ZOMBIE_RADIUS;
+          else if (m === dn) pos.z = o.z - o.halfZ - ZOMBIE_RADIUS;
+          else pos.z = o.z + o.halfZ + ZOMBIE_RADIUS;
+        }
+      }
+      continue;
+    }
+    const dx = pos.x - o.x;
+    const dz = pos.z - o.z;
+    const min = o.r + ZOMBIE_RADIUS;
+    const d2 = dx * dx + dz * dz;
+    if (d2 < min * min) {
+      const d = Math.sqrt(d2) || 1e-4;
+      pos.x = o.x + (dx / d) * min;
+      pos.z = o.z + (dz / d) * min;
+    }
+  }
+}
 
 function createZombieGroup() {
   const group = new THREE.Group();
@@ -82,14 +121,16 @@ function createHealthBar() {
   return { group, back, fill };
 }
 
-function makeZombie(x, z, speed) {
+function makeZombie(x, z, speed, id) {
   const group = createZombieGroup();
   const bar = createHealthBar();
   group.position.set(x, 0, z);
+  resolveZombieObstacles(group.position); // never spawn inside cover
   group.rotation.set(0, Math.atan2(-x, -z), 0);
   scene.add(group);
   scene.add(bar.group);
   const zo = {
+    id: id || ('z' + (zidCounter++)),
     group,
     healthBar: bar,
     velocity: new THREE.Vector3(),
@@ -161,11 +202,19 @@ export function animateZombies(dt, ctx) {
     const z = zombies[i];
     if (!z.dead) {
       anyAlive = true;
-      _toZombie.set(
-        ctx.player.feet.x - z.group.position.x,
-        0,
-        ctx.player.feet.z - z.group.position.z
-      );
+      let tx, tz, tid;
+      if (ctx.targets && ctx.targets.length) {
+        // Multiplayer (host): chase the nearest player.
+        let best = Infinity;
+        for (const p of ctx.targets) {
+          const ddx = p.x - z.group.position.x, ddz = p.z - z.group.position.z;
+          const dd = ddx * ddx + ddz * ddz;
+          if (dd < best) { best = dd; tx = p.x; tz = p.z; tid = p.id; }
+        }
+      } else {
+        tx = ctx.player.feet.x; tz = ctx.player.feet.z; tid = 'me';
+      }
+      _toZombie.set(tx - z.group.position.x, 0, tz - z.group.position.z);
       const dist = _toZombie.length();
       _toZombie.normalize();
 
@@ -195,10 +244,11 @@ export function animateZombies(dt, ctx) {
       p.legR.rotation.x = Math.sin(t) * 0.5;
       p.head.rotation.x = Math.sin(t * 0.5) * 0.15;
 
-      // Keep the zombie inside the arena.
+      // Keep the zombie inside the arena and out of cover (crates / posts).
       const zlim = ARENA_HALF - ZOMBIE_RADIUS;
       z.group.position.x = Math.max(-zlim, Math.min(zlim, z.group.position.x));
       z.group.position.z = Math.max(-zlim, Math.min(zlim, z.group.position.z));
+      resolveZombieObstacles(z.group.position);
 
       // Health bar follows and billboards toward the camera.
       z.healthBar.group.visible = true;
@@ -209,7 +259,8 @@ export function animateZombies(dt, ctx) {
       z.hitTimer = Math.max(0, z.hitTimer - dt);
       if (dist < HIT_RANGE && z.hitTimer <= 0) {
         z.hitTimer = HIT_COOLDOWN;
-        ctx.onZombieHit(_toZombie, z);
+        if (ctx.onBite) ctx.onBite(tid, _toZombie, z);
+        else ctx.onZombieHit(_toZombie, z);
       }
     } else {
       // Death: topple over and sink.
@@ -220,7 +271,7 @@ export function animateZombies(dt, ctx) {
       z.healthBar.group.visible = false;
     }
   }
-  if (!anyAlive) {
+  if (!anyAlive && ctx.player && ctx.vignette) {
     ctx.vignette.style.opacity = Math.max(0, 1 - ctx.player.hp / ZOMBIE_HP) * 0.5;
   }
   return anyAlive;
@@ -234,6 +285,82 @@ export function animateIdleZombies() {
     const ph = t * 0.4 + i * 1.7;
     p.armL.rotation.x = Math.sin(ph) * 0.3;
     p.armR.rotation.x = -Math.sin(ph) * 0.3;
+  }
+}
+
+// --- Multiplayer (shared horde) helpers -------------------------------------
+
+// Create a render-only zombie from a network snapshot (joiner side).
+export function makeZombieNet(id, x, z) {
+  const z = makeZombie(x, z, 0, id);
+  z.group.position.set(x, 0, z);
+  return z;
+}
+
+// Dispose and remove one zombie (joiner reconciliation).
+export function removeZombie(z) {
+  const i = zombies.indexOf(z);
+  if (i >= 0) zombies.splice(i, 1);
+  scene.remove(z.group);
+  scene.remove(z.healthBar.group);
+  z.group.traverse((o) => { if (o.isMesh) o.geometry.dispose(); });
+  z.healthBar.back.geometry.dispose();
+  z.healthBar.fill.geometry.dispose();
+}
+
+export function findZombie(id) {
+  for (const z of zombies) if (z.id === id) return z;
+  return null;
+}
+
+// Raycast from the camera centre at our local zombies. Returns { id, point }
+// for the first hit, or null. Damage is applied by the authoritative host.
+const _zNDC = new THREE.Vector2(0, 0);
+const _zRay = new THREE.Raycaster();
+export function applyZombieShot(camera) {
+  _zRay.setFromCamera(_zNDC, camera);
+  const targets = [];
+  for (const z of zombies) z.group.traverse((o) => { if (o.isMesh) { o.userData.zombie = z; targets.push(o); } });
+  if (!targets.length) return null;
+  const hits = _zRay.intersectObjects(targets, false);
+  if (!hits.length) return null;
+  const z = hits[0].object.userData.zombie;
+  if (!z) return null;
+  return { id: z.id, point: hits[0].point };
+}
+
+// Joiner: smooth our render zombies toward the host's streamed positions and
+// animate their limbs / death.
+export function animateRemoteZombies(dt, camera) {
+  const lerp = 1 - Math.pow(0.0001, dt);
+  const step = Math.min(1, lerp * 1.5);
+  for (let i = 0; i < zombies.length; i++) {
+    const z = zombies[i];
+    if (!z.net) continue;
+    z.group.position.x += (z.net.x - z.group.position.x) * step;
+    z.group.position.z += (z.net.z - z.group.position.z) * step;
+    z.group.position.y = 0;
+    let diff = z.net.ry - z.group.rotation.y;
+    diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+    z.group.rotation.y += diff * Math.min(1, lerp * 2);
+    const p = z.group.userData.parts;
+    if (!z.netDead) {
+      const t = performance.now() * 0.004 + i * 1.7;
+      p.armL.rotation.x = Math.sin(t) * 0.7;
+      p.armR.rotation.x = -Math.sin(t) * 0.7;
+      p.legL.rotation.x = -Math.sin(t) * 0.5;
+      p.legR.rotation.x = Math.sin(t) * 0.5;
+      p.head.rotation.x = Math.sin(t * 0.5) * 0.15;
+      z.healthBar.group.visible = true;
+      z.healthBar.group.position.set(z.group.position.x, 2.35, z.group.position.z);
+      z.healthBar.group.quaternion.copy(camera.quaternion);
+      updateZombieHealthBar(z);
+    } else {
+      const fall = Math.min(1, z.deathT / 0.6);
+      z.group.rotation.x = (-Math.PI / 2) * fall;
+      z.group.position.y = -0.4 * fall;
+      z.healthBar.group.visible = false;
+    }
   }
 }
 
