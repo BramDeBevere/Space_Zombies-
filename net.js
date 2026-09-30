@@ -46,6 +46,7 @@ function routeLocal(d) {
   else if (d.t === 'zstate') handlers('zstate', d);
   else if (d.t === 'wave') handlers('wave', d);
   else if (d.t === 'bite') handlers('bite', d);
+  else if (d.t === 'zhit') handlers('zhit', d);
 }
 
 // Send to every open connection (our own messages).
@@ -194,7 +195,14 @@ export function sendBite(tid, pid, dmg) {
   send({ t: 'bite', id: myId, tid, pid, dmg: Math.round(dmg) });
 }
 
+/** Player -> host: this player hit shared zombie `tid` (damage applied on host). */
+export function sendZombieHit(tid) {
+  if (myId == null) return;
+  send({ t: 'zhit', id: myId, tid });
+}
+
 export function getId() { return myId; }
+export function getRole() { return role; } // 'host' | 'joiner' | null
 export function isConnected() { return !!(peer && peer.open); }
 export function disconnect() {
   closed = true;

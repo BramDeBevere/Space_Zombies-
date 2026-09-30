@@ -203,7 +203,7 @@ export function shoot(onKill) {
   recoilImpulse = Math.min(0.14, recoilImpulse + RECOIL);
   flashlight.intensity = LIGHT_BASE + 6;
 
-  if (firstHit) {
+  if (firstHit && !netZombieDamage) {
     const z = firstHit.object.userData.zombie;
     if (z && !z.dead) {
       z.hp -= BULLET_DAMAGE;
@@ -217,6 +217,11 @@ export function shoot(onKill) {
 // --- Fire throttling + recoil reset (called by the input handler / on start) ---
 let fireNet = null; // optional callback(ox,oy,oz,ex,ey,ez) — broadcast the shot
 export function setFireNet(fn) { fireNet = fn; }
+
+// When true, a shot does NOT damage local zombies (multiplayer: the host is
+// authoritative, so the net path applies zombie damage instead).
+let netZombieDamage = false;
+export function setNetZombieDamage(b) { netZombieDamage = b; }
 
 export function tryFire(onKill, shootOverride) {
   const now = performance.now();

@@ -10,6 +10,13 @@ const _dir = new THREE.Vector3();
 
 export function remoteCount() { return remotes.size; }
 
+// World positions of the other players — the host uses these as horde targets.
+export function positions() {
+  const out = [];
+  for (const r of remotes.values()) out.push({ id: r.id, x: r.group.position.x, y: r.group.position.y, z: r.group.position.z });
+  return out;
+}
+
 // Shared transient-effect list for remote tracers.
 const effects = [];
 
