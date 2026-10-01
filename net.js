@@ -76,6 +76,8 @@ function routeGame(d) {
   else if (t === 'bite') emit('bite', d);
   else if (t === 'zhit') emit('zhit', d);
   else if (t === 'boom') emit('boom', d);
+  else if (t === 'kartmove') emit('kartmove', d);
+  else if (t === 'kartstate') emit('kartstate', d);
 }
 
 // Shared behaviour for a data channel from an in-room peer. (Mesh creation is
@@ -220,6 +222,28 @@ export function sendState(x, y, z, ay, hp) {
   if (now - lastState < 50) return;
   lastState = now;
   sendToRoom({ t: 'state', id: myId, x: r3(x), y: r3(y), z: r3(z), ay: r3(ay), hp: Math.round(hp) });
+}
+
+let lastKart = 0;
+
+/**
+ * Broadcast my kart's position + heading so the host can crush from it and
+ * stream it onward. Joiners send this for their own kart (throttled ~10 Hz);
+ * the host's own kart rides in `kartstate` instead. `driverId` is the stable
+ * peer id of whoever is driving (so remotes can show a head in the seat).
+ */
+export function sendKartMove(kartId, x, z, dx, dz, driverId) {
+  if (myId == null) return;
+  const now = performance.now();
+  if (now - lastKart < 100) return;
+  lastKart = now;
+  sendToRoom({ t: 'kartmove', id: myId, k: kartId, x: r3(x), z: r3(z), dx: r3(dx), dz: r3(dz), driver: driverId });
+}
+
+/** Host -> room: the authoritative kart snapshot (positions + drivers). */
+export function sendKartState(payload) {
+  if (myId == null) return;
+  sendToRoom({ t: 'kartstate', id: myId, ks: payload });
 }
 
 /**

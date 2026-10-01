@@ -27,6 +27,13 @@ export function ensureAudio() {
   if (ctx.state === 'suspended') ctx.resume();
 }
 
+/** Set the overall master volume (0..1). No-op until the context exists. */
+export function setMasterVolume(v) {
+  if (!master) return;
+  const level = Math.min(1, Math.max(0, Number.isFinite(v) ? v : MASTER_LEVEL));
+  master.gain.value = level;
+}
+
 function makeNoiseBuffer(c) {
   const len = Math.floor(c.sampleRate * 1.0);
   const buf = c.createBuffer(1, len, c.sampleRate);
@@ -331,6 +338,67 @@ export function sfxStart() {
   osc.connect(g).connect(master);
   osc.start(t);
   osc.stop(t + 0.36);
+}
+
+/** Jumping into a kart: a short engine "rev" — rising sawtooth with a rumble. */
+export function sfxKartEnter() {
+  if (!ctx) return;
+  const t = ctx.currentTime;
+
+  const osc = ctx.createOscillator();
+  osc.type = 'sawtooth';
+  osc.frequency.setValueAtTime(70, t);
+  osc.frequency.exponentialRampToValueAtTime(340, t + 0.18);
+  const lp = ctx.createBiquadFilter();
+  lp.type = 'lowpass';
+  lp.frequency.setValueAtTime(900, t);
+  lp.frequency.exponentialRampToValueAtTime(2200, t + 0.18);
+  const g = ctx.createGain();
+  env(g, t, 0.4, 0.02, 0.22);
+  osc.connect(lp).connect(g).connect(master);
+  osc.start(t);
+  osc.stop(t + 0.28);
+
+  // Low rumble under the rev.
+  const th = ctx.createOscillator();
+  th.type = 'sine';
+  th.frequency.setValueAtTime(90, t);
+  th.frequency.exponentialRampToValueAtTime(50, t + 0.24);
+  const tg = ctx.createGain();
+  env(tg, t, 0.35, 0.02, 0.24);
+  th.connect(tg).connect(master);
+  th.start(t);
+  th.stop(t + 0.28);
+}
+
+/** Hopping out of a kart: a low engine "cut-off" clunk. */
+export function sfxKartExit() {
+  if (!ctx) return;
+  const t = ctx.currentTime;
+
+  const osc = ctx.createOscillator();
+  osc.type = 'sawtooth';
+  osc.frequency.setValueAtTime(300, t);
+  osc.frequency.exponentialRampToValueAtTime(60, t + 0.18);
+  const lp = ctx.createBiquadFilter();
+  lp.type = 'lowpass';
+  lp.frequency.setValueAtTime(1200, t);
+  lp.frequency.exponentialRampToValueAtTime(400, t + 0.18);
+  const g = ctx.createGain();
+  env(g, t, 0.35, 0.005, 0.2);
+  osc.connect(lp).connect(g).connect(master);
+  osc.start(t);
+  osc.stop(t + 0.24);
+
+  // A small mechanical clunk.
+  const cl = ctx.createOscillator();
+  cl.type = 'square';
+  cl.frequency.setValueAtTime(140, t);
+  const cg = ctx.createGain();
+  env(cg, t, 0.18, 0.002, 0.08);
+  cl.connect(cg).connect(master);
+  cl.start(t);
+  cl.stop(t + 0.1);
 }
 
 // ---------------------------------------------------------------------------

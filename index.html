@@ -53,6 +53,27 @@
       color: #eaf1fb; font-weight: 700; font-family: inherit; }
     #overlay .cta { margin-top: 18px; font-size: 18px; color: #8fd0ff; letter-spacing: 1px;
       animation: pulse 1.6s ease-in-out infinite; }
+    /* Settings */
+    #overlay .menu-buttons { display: flex; gap: 10px; margin: 16px 0 4px; flex-wrap: wrap;
+      justify-content: center; }
+    #overlay .keys.hidden { display: none; }
+    #overlay .settings { display: flex; flex-direction: column; gap: 10px; margin: 6px auto 2px;
+      max-width: 360px; width: 100%; padding: 16px 18px; border-radius: 14px;
+      border: 1px solid rgba(255,255,255,0.14); background: rgba(10,16,26,0.6);
+      cursor: default; text-align: left; }
+    #overlay .settings.hidden { display: none; }
+    #overlay .settings-title { font-size: 12px; letter-spacing: 2px; text-transform: uppercase;
+      color: #6f7f95; margin-bottom: 2px; }
+    #overlay .setting-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    #overlay .setting-row .lbl { font-size: 14px; color: #cdd8e6; }
+    #overlay .setting-row .hint { display: block; font-size: 11px; color: #6f7f95; margin-top: 1px; }
+    #overlay .setting-row input[type="range"] { width: 150px; accent-color: #58c7ff; cursor: pointer; }
+    #overlay .setting-row select { background: rgba(0,0,0,0.35); color: #eaf1fb; border: 1px solid
+      rgba(255,255,255,0.25); border-radius: 8px; padding: 6px 10px; font: inherit; cursor: pointer; }
+    #overlay .setting-row input[type="checkbox"] { width: 20px; height: 20px; accent-color: #58c7ff; cursor: pointer; }
+    #overlay .setting-row .val { min-width: 44px; text-align: right; font-size: 13px; color: #8fd0ff;
+      font-variant-numeric: tabular-nums; }
+    #overlay .settings-reset { align-self: flex-start; margin-top: 2px; }
     #overlay .modes { display: flex; gap: 12px; margin: 18px 0 4px; flex-wrap: wrap; justify-content: center; }
     #overlay .mode { min-width: 150px; padding: 14px 20px; border-radius: 12px; cursor: pointer;
       border: 1px solid rgba(255,255,255,0.2); background: rgba(255,255,255,0.05); transition: all 0.15s; }
@@ -142,6 +163,14 @@
       75% { opacity: 1; }
       100% { opacity: 0; transform: scale(1.05); }
     }
+    #climb-hint { position: fixed; top: 57%; left: 0; right: 0; text-align: center;
+      z-index: 6; pointer-events: none; opacity: 0; transition: opacity 0.15s ease;
+      font-size: 15px; font-weight: 700; letter-spacing: 1px; color: #eaf1fb;
+      text-shadow: 0 0 14px rgba(120,180,255,0.7); }
+    #climb-hint.show { opacity: 1; }
+    #climb-hint kbd { display: inline-block; min-width: 22px; margin-right: 7px; padding: 2px 7px;
+      border-radius: 5px; background: rgba(20,28,44,0.85); border: 1px solid rgba(120,180,255,0.5);
+      color: #cfe0ff; }
   </style>
 
   <!-- Pinned Three.js via a CDN import map (no npm, no local copies). -->
@@ -210,20 +239,21 @@
   </div>
 
   <div id="banner"></div>
+  <div id="climb-hint"></div>
   <div id="weapon-hud"><span id="weapon-name">PISTOL</span><span id="weapon-ammo">12/12</span></div>
-  <div id="hint">ZQSD move &middot; mouse look &middot; Shift run &middot; Space jump &middot; E climb watchtower &middot; 1-6 weapons &middot; R reload &middot; wheel switch &middot; RMB aim &middot; Esc release cursor</div>
+  <div id="hint">ZQSD move &middot; mouse look &middot; Shift run &middot; Space jump &middot; C crouch &middot; E climb watchtower &middot; F drive kart &middot; 1-6 weapons &middot; R reload &middot; wheel switch &middot; RMB aim &middot; Esc release cursor</div>
 
   <div id="overlay">
     <h1>DEAD<span class="sub"> ARENA</span></h1>
-    <p id="overlay-desc">You are alone in a night arena. Survive the waves — each one brings more, faster zombies.<br />Shoot them before they reach you.</p>
+    <p id="overlay-desc">Survive the night. Each wave brings more, faster zombies — shoot them before they reach you.</p>
     <div class="modes" id="mode-row">
       <div class="mode" data-mode="solo">
         <span class="t">Solo</span>
-        <span class="d">Fight the zombie waves on your own.</span>
+        <span class="d">Alone vs. the horde.</span>
       </div>
       <div class="mode" data-mode="multi">
         <span class="t">Multiplayer</span>
-        <span class="d">Create a room and share its code, or type a friend's code to join. Up to 4 players fight the same horde together.</span>
+        <span class="d">Up to 4 players in one room.</span>
       </div>
     </div>
 
@@ -244,15 +274,53 @@
       <button class="btn ghost" id="room-back">&larr; Back</button>
       <div class="room-status" id="room-status"></div>
     </div>
-    <div class="keys">
+
+    <div class="menu-buttons">
+      <button class="btn ghost" id="settings-toggle">&#9881; Settings</button>
+      <button class="btn ghost" id="keys-toggle">&#9000; Key bindings</button>
+    </div>
+    <div class="settings hidden" id="settings">
+      <div class="settings-title">Options</div>
+      <label class="setting-row">
+        <span class="lbl">Players can damage each other
+          <span class="hint">Multiplayer only. Turn off to fight the horde together.</span></span>
+        <input type="checkbox" id="set-pvp" checked />
+      </label>
+      <label class="setting-row">
+        <span class="lbl">Spawn location</span>
+        <select id="set-spawn">
+          <option value="center" selected>Arena centre</option>
+          <option value="random">Random each time</option>
+        </select>
+      </label>
+      <label class="setting-row">
+        <span class="lbl">Volume <span class="val" id="set-volume-val">90%</span></span>
+        <input type="range" id="set-volume" min="0" max="100" value="90" />
+      </label>
+      <label class="setting-row">
+        <span class="lbl">Mouse sensitivity <span class="val" id="set-sensitivity-val">1.00</span></span>
+        <input type="range" id="set-sensitivity" min="20" max="300" value="100" />
+      </label>
+      <label class="setting-row">
+        <span class="lbl">Field of view <span class="val" id="set-fov-val">72&deg;</span></span>
+        <input type="range" id="set-fov" min="55" max="100" value="72" />
+      </label>
+      <button class="btn ghost settings-reset" id="set-reset">Reset to defaults</button>
+    </div>
+
+    <div class="keys hidden" id="keys-row">
       <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd>
       <span style="align-self:center;color:#5a6a80">move</span>
       <kbd>Shift</kbd>
       <span style="align-self:center;color:#5a6a80">sprint</span>
       <kbd>Space</kbd>
       <span style="align-self:center;color:#5a6a80">jump</span>
+      <kbd>C</kbd>
+      <span style="align-self:center;color:#5a6a80">crouch</span>
       <kbd>E</kbd>
       <span style="align-self:center;color:#5a6a80">climb watchtower</span>
+      <kbd>F</kbd>
+      <span style="align-self:center;color:#5a6a80">drive kart</span>
       <kbd>Click</kbd>
       <span style="align-self:center;color:#5a6a80">shoot</span>
       <kbd>Mouse</kbd>

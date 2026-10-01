@@ -4,6 +4,7 @@
 import * as THREE from 'three';
 import { scene } from './world.js';
 import { playRemoteShotSfx, vfxRemoteBoom } from './weapon.js';
+import { kartOfDriver, kartTransform } from './karts.js';
 
 const remotes = new Map(); // id -> remote
 const _dir = new THREE.Vector3();
@@ -26,7 +27,7 @@ export function remoteCount() { return remotes.size; }
 // World positions of the other players — the host uses these as horde targets.
 export function positions() {
   const out = [];
-  for (const r of remotes.values()) out.push({ id: r.id, x: r.group.position.x, y: r.group.position.y, z: r.group.position.z });
+  for (const r of remotes.values()) out.push({ id: r.id, x: r.group.position.x, y: r.group.position.y, z: r.group.position.z, hp: r.hp });
   return out;
 }
 
@@ -67,7 +68,19 @@ function makeRemote(id) {
   const legR = new THREE.Mesh(legGeo, mat); legR.position.set(0.18, 0.4, 0);
 
   group.add(body, head, visor, legL, legR);
+  group.traverse((o) => { o.userData.remote = id; });  // weapon.js: attribute hits to this player
   scene.add(group);
+
+  // A head that sits in the kart's seat while this player is driving; the
+  // body stays parked (hidden) so they read as "in the kart" to everyone.
+  const seat = new THREE.Group();
+  const sHead = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.46, 0.46), skin);
+  sHead.castShadow = true;
+  const sVisor = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.12, 0.06), accent);
+  sVisor.position.set(0, 0.03, 0.22);
+  seat.add(sHead, sVisor);
+  seat.visible = false;
+  scene.add(seat);
 
   const bar = makeHealthBar();
   bar.fill.material.color.set(c.base);
@@ -77,6 +90,7 @@ function makeRemote(id) {
     id,
     color: c.base,
     group,
+    seat,
     healthBar: bar,
     target: new THREE.Vector3(group.position.x, 0, group.position.z),
     prev: new THREE.Vector3(),
@@ -168,7 +182,12 @@ export function clearRemotes() {
 function disposeRemote(r) {
   scene.remove(r.group);
   scene.remove(r.healthBar.group);
+  if (r.seat) scene.remove(r.seat);
   r.group.traverse((o) => {
+    if (o.geometry) o.geometry.dispose();
+    if (o.material) o.material.dispose();
+  });
+  if (r.seat) r.seat.traverse((o) => {
     if (o.geometry) o.geometry.dispose();
     if (o.material) o.material.dispose();
   });
@@ -191,21 +210,37 @@ export function updateRemotes(dt, camera) {
       if (r.fade <= 0.02) { disposeRemote(r); remotes.delete(r.id); continue; }
     }
 
-    // Smoothly move toward the latest network position.
-    const lerp = 1 - Math.pow(0.0001, dt);
-    _dir.copy(r.target).sub(r.group.position);
-    r.group.position.addScaledVector(_dir, Math.min(1, lerp * 1.4));
+    // While this player is driving a kart, park the body (hidden) and show a
+    // head in the seat, tracking the kart's streamed position/heading.
+    const kartId = kartOfDriver(r.id);
+    if (kartId != null) {
+      r.group.visible = false;
+      r.seat.visible = true;
+      const t = kartTransform(kartId);
+      if (t) {
+        r.seat.position.set(t.x, 0.95, t.z); // just above the seat back
+        r.seat.rotation.y = t.ry;
+        r.healthBar.group.position.set(t.x, 1.5, t.z);
+      }
+    } else {
+      r.group.visible = true;
+      r.seat.visible = false;
 
-    // Face the last reported look direction, smoothly.
-    {
+      // Smoothly move toward the latest network position.
+      const lerp = 1 - Math.pow(0.0001, dt);
+      _dir.copy(r.target).sub(r.group.position);
+      r.group.position.addScaledVector(_dir, Math.min(1, lerp * 1.4));
+
+      // Face the last reported look direction, smoothly.
       let diff = r.ay - r.group.rotation.y;
       diff = Math.atan2(Math.sin(diff), Math.cos(diff));
       r.group.rotation.y += diff * Math.min(1, lerp * 2.2);
-    }
-    r.prev.copy(r.group.position);
+      r.prev.copy(r.group.position);
 
-    // Keep the health bar billboarded + centred above the character.
-    r.healthBar.group.position.set(r.group.position.x, r.group.position.y + 2.35, r.group.position.z);
+      // Keep the health bar centred above the character.
+      r.healthBar.group.position.set(r.group.position.x, r.group.position.y + 2.35, r.group.position.z);
+    }
+    // Billboard the health bar in both cases.
     r.healthBar.group.quaternion.copy(camera.quaternion);
   }
   updateEffects(dt);

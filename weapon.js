@@ -2,7 +2,7 @@
 // rifle, sniper, shotgun, RPG). Raycast / pellet hits, tracers, muzzle flash,
 // hit sparks, RPG rocket + explosion VFX, recoil, ammo + reload, sniper zoom.
 import * as THREE from 'three';
-import { camera, scene } from './world.js';
+import { camera, scene, ARENA_HALF, obstacles } from './world.js';
 import { zombies } from './zombie.js';
 import { playerMeshes, damageRemote } from './remotes.js';
 import {
@@ -32,6 +32,7 @@ let reload = 0;                              // seconds remaining of a reload (0
 
 let fireNet = null;                          // (tracers, wId) => void — broadcast shot visuals
 let netZombieDamage = false;                 // true in multi: host applies zombie damage
+let pvpEnabled = true;                       // settings: allow player-vs-player damage
 let fireCb = null;                           // async fire results (RPG blast) → routing
 export function setFireCallback(fn) { fireCb = fn; }
 
@@ -48,8 +49,13 @@ const tracerGeo = (() => {
 })();
 const effects = [];
 const rockets = [];           // in-flight RPG rockets
-const BASE_FOV = camera.fov;
+let BASE_FOV = camera.fov;          // base field of view (settings.js can retune it)
 const _shootDir = new THREE.Vector3();
+
+// settings.js: retune the base FOV the camera eases toward when not scoped.
+export function setWeaponFov(v) {
+  if (typeof v === 'number' && v > 0) BASE_FOV = v;
+}
 
 // --- Flashlight + lamp glow (parented to the camera so it follows look) ---
 const flashlight = new THREE.SpotLight(0xfff2cf, LIGHT_BASE, 55, Math.PI / 5.5, 0.5, 1.2);
@@ -273,14 +279,65 @@ function spawnRpgRocket(muzzle, end, onImpact) {
   grp.position.copy(muzzle);
   grp.lookAt(end);
   scene.add(grp);
-  rockets.push({ grp, from: muzzle.clone(), end: end.clone(), t: 0, onImpact });
+  // Distance-based flight: the rocket advances at a constant speed and
+  // detonates on the first thing it touches (see updateRockets), instead of
+  // always flying the full pre-aimed distance.
+  const total = muzzle.distanceTo(end);
+  rockets.push({
+    grp, from: muzzle.clone(), end: end.clone(),
+    dir: end.clone().sub(muzzle).normalize(),
+    dist: 0, total: Math.max(total, 1e-3),
+    speed: Math.max(total, 1e-3) * 0.6,   // ~1.6s of travel, as before
+    onImpact,
+  });
 }
+
+// 2D (top-down) "did the rocket hit anything at point p?" — arena walls, world
+// obstacles (same circle/box colliders the player uses), and live entities.
+function rocketHit(p) {
+  // Arena boundary walls.
+  if (Math.abs(p.x) > ARENA_HALF - 0.5 || Math.abs(p.z) > ARENA_HALF - 0.5) return true;
+  for (const o of obstacles) {
+    if (o.box) {
+      const nx = Math.max(o.x - o.halfX, Math.min(p.x, o.x + o.halfX));
+      const nz = Math.max(o.z - o.halfZ, Math.min(p.z, o.z + o.halfZ));
+      if (Math.hypot(p.x - nx, p.z - nz) < 0.15) return true;
+    } else if (Math.hypot(p.x - o.x, p.z - o.z) < o.r + 0.15) {
+      return true;
+    }
+  }
+  const R = 0.9; // entity touch radius
+  for (const z of zombies) {
+    if (z.dead) continue;
+    const zp = z.group.position;
+    if (Math.hypot(p.x - zp.x, p.z - zp.z) < R) return true;
+  }
+  if (pvpEnabled) for (const r of playerMeshes()) {
+    const gp = r.group.position;
+    if (Math.hypot(p.x - gp.x, p.z - gp.z) < R) return true;
+  }
+  return false;
+}
+
 function updateRockets(dt) {
   for (let i = rockets.length - 1; i >= 0; i--) {
     const r = rockets[i];
-    r.t += dt * 0.5; // ~2s to travel
-    const tt = Math.min(1, r.t);
-    r.grp.position.lerpVectors(r.from, r.end, tt);
+    r.dist += r.speed * dt;
+    const segStart = Math.min(r.total, r.dist - r.speed * dt); // distance covered before this frame
+    const step = Math.min(r.total, r.dist);
+    // March only this frame's segment (segStart → step) in sub-steps so a fast
+    // rocket can't tunnel through a thin wall; detonate at first contact.
+    let hitAt = null;
+    const n = Math.max(1, Math.ceil((step - segStart) / 0.2));
+    for (let s = 1; s <= n; s++) {
+      const d = segStart + (step - segStart) * (s / n);
+      const px = r.from.x + r.dir.x * d;
+      const pz = r.from.z + r.dir.z * d;
+      if (rocketHit({ x: px, z: pz })) { hitAt = new THREE.Vector3(px, r.from.y + r.dir.y * d, pz); break; }
+    }
+    const done = step >= r.total;
+    const boom = hitAt || (done ? r.end.clone() : null);
+    r.grp.position.set(r.from.x + r.dir.x * step, r.from.y + r.dir.y * step, r.from.z + r.dir.z * step);
     r.grp.lookAt(r.end);
     // Faint smoke trail behind the rocket.
     if (Math.random() < 0.7) {
@@ -292,11 +349,11 @@ function updateRockets(dt) {
       m.lookAt(r.from);
       spawnEffect(m, 0.2);
     }
-    if (tt >= 1) {
+    if (boom) {
       scene.remove(r.grp);
       r.grp.traverse((o) => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
       rockets.splice(i, 1);
-      if (r.onImpact) r.onImpact(r.end);
+      if (r.onImpact) r.onImpact(boom);
     }
   }
 }
@@ -399,7 +456,7 @@ function rayDirHit(origin, dir, maxDist) {
   _ray2.set(origin, dir.clone().normalize(), 0, maxDist);
   const targets = [];
   for (const z of zombies) if (!z.dead) z.group.traverse((o) => { if (o.isMesh) targets.push(o); });
-  for (const r of playerMeshes()) r.group.traverse((o) => { if (o.isMesh) targets.push(o); });
+  if (pvpEnabled) for (const r of playerMeshes()) r.group.traverse((o) => { if (o.isMesh) targets.push(o); });
   if (!targets.length) return null;
   const hits = _ray2.intersectObjects(targets, false);
   return hits.length ? hits[0] : null;
@@ -456,7 +513,7 @@ function doFire() {
     _ray2.set(m, fwd.clone().normalize(), 0, 90);
     const rt = [];
     for (const z of zombies) if (!z.dead) z.group.traverse((o) => { if (o.isMesh) rt.push(o); });
-    for (const r of playerMeshes()) r.group.traverse((o) => { if (o.isMesh) rt.push(o); });
+    if (pvpEnabled) for (const r of playerMeshes()) r.group.traverse((o) => { if (o.isMesh) rt.push(o); });
     const rh = rt.length ? _ray2.intersectObjects(rt, false) : [];
     const end = rh.length ? rh[0].point : m.clone().addScaledVector(fwd, 90);
     spawnTracer(m, end, 0xffc080, true);
@@ -478,7 +535,7 @@ function doFire() {
           blast.zHits.push({ id: z.id, dmg });
         }
       }
-      for (const r of playerMeshes()) {
+      if (pvpEnabled) for (const r of playerMeshes()) {
         const d = r.group.position.distanceTo(pt);
         if (d < w.blast + 0.5) {
           const dmg = Math.round(w.dmg * THREE.MathUtils.clamp(1 - (d / w.blast) * 0.5, 0.4, 0.85));
@@ -529,6 +586,7 @@ function startReload() {
 
 export function setFireNet(fn) { fireNet = fn; }
 export function setNetZombieDamage(b) { netZombieDamage = b; }
+export function setPvpEnabled(b) { pvpEnabled = !!b; }
 // Fire if allowed. Returns the fire result, or null if it couldn't fire
 // (on cooldown / out of ammo — the latter also starts a reload).
 export function tryFire() {

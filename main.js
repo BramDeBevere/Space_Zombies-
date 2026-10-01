@@ -7,7 +7,7 @@ import * as THREE from 'three';
 import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
 
 import { renderer, scene, camera, skyDome } from './world.js';
-import { player, updatePlayer, resetPlayer } from './player.js';
+import { player, updatePlayer, resetPlayer, applySpawn, towerInRange } from './player.js';
 import {
   ZOMBIE_HP, ZOMBIE_HIT_DAMAGE, ZOMBIE_KNOCKBACK, WAVE_CLEAR_DELAY,
   zombies, spawnWave, cleanupWave, animateZombies, animateIdleZombies,
@@ -19,17 +19,20 @@ import {
   updateWeaponEffects, resetRecoil, setFireNet, setNetZombieDamage,
   setAiming, isAutoFire, scopeProgress, selectWeapon, switchWeapon, requestReload,
   resetWeapon, getWeaponName, getAmmo, setFireCallback, WEAPON_COUNT,
+  setPvpEnabled, setWeaponFov,
 } from './weapon.js';
 import {
   setDead, hideOverlay, showOverlay, showBanner, updateHUD, showDeath,
   onModePick, onRoomAction, showMultiLobby, hideMultiLobby,
   setRoomName, setRoomStatus, showPlayWaiting,
-  vignette, overlay, formatTime,
+  onSettingsChange, onSettingsReset, setSettingsValues,
+  vignette, overlay, formatTime, setClimbHint,
 } from './ui.js';
 import {
   connectLobby, createRoom, joinRoom, leaveRoom,
   sendState, sendFire, sendHit, sendZState, sendWave,
-  sendBite, sendZombieHit, sendBoom, getRole, getId,
+  sendBite, sendZombieHit, sendBoom, sendKartMove, sendKartState,
+  getRole, getId,
   disconnect as netDisconnect,
 } from './net.js';
 import {
@@ -37,9 +40,18 @@ import {
   positions as remotePositions,
 } from './remotes.js';
 import {
+  spawnKarts, updateKarts, toggleKart, ejectPlayer,
+  KART_CRUSH_DAMAGE, localKartNetState, hostKartsPayload,
+  applyKartStates, receiveKartMove, dropKartForDriver,
+} from './karts.js';
+import {
   ensureAudio, sfxStart, sfxHit, sfxWave, sfxDeath, sfxKill,
+  sfxKartEnter, sfxKartExit,
   startAmbient, stopAmbient,
 } from './sound.js';
+import {
+  settings, loadSettings, saveSettings, applySettings, setControls, DEFAULTS,
+} from './settings.js';
 
 // ---------------------------------------------------------------------------
 // Controls — PointerLockControls gives us mouse look for free.
@@ -68,7 +80,7 @@ renderer.domElement.addEventListener('mouseup', (e) => {
 });
 renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
 
-// Hotkeys 1-6 select a weapon; R starts a reload.
+// Hotkeys 1-6 select a weapon; R starts a reload; F jumps in/out of a kart.
 window.addEventListener('keydown', (e) => {
   if (!controls.isLocked || !playing || dead) return;
   if (e.code.startsWith('Digit')) {
@@ -76,6 +88,10 @@ window.addEventListener('keydown', (e) => {
     if (n >= 1 && n <= WEAPON_COUNT) selectWeapon(n - 1);
   } else if (e.code === 'KeyR') {
     requestReload();
+  } else if (e.code === 'KeyF') {
+    const r = toggleKart();
+    if (r === 'enter') sfxKartEnter();
+    else if (r === 'exit') sfxKartExit();
   }
 });
 // Mouse wheel cycles weapons.
@@ -87,6 +103,7 @@ window.addEventListener('wheel', (e) => {
 // Fire the current weapon once and route the result (kills / net).
 function fireOnce() {
   if (!controls.isLocked || !playing || dead) return;
+  if (mpActive && mpDead) return; // downed: no shooting until we respawn next wave
   const res = tryFire();
   if (res) routeFire(res);
 }
@@ -115,6 +132,23 @@ function applyZombieHit(id, dmg) {
   updateZombieHealthBar(z);
   if (z.hp <= 0) { killZombie(z); sfxKill(); return true; }
   return false;
+}
+
+// A kart ploughed through a zombie: apply heavy crush damage (mode-aware).
+// Only ever called from updateKarts when we're crush-authoritative (solo or
+// multi host). Solo mutates the local horde; the host applies it authoritatively
+// and streams the result. A joiner never calls this (doCrush=false; the host
+// crushes its kart), so the mode==='multi' joiner case is unreachable.
+function handleKartCrush(z) {
+  if (!z || z.dead) return;
+  if (mode === 'multi') {
+    hostZombieDamage(z, KART_CRUSH_DAMAGE); // host (authoritative)
+    return;
+  }
+  // Solo
+  z.hp = Math.max(0, z.hp - KART_CRUSH_DAMAGE);
+  updateZombieHealthBar(z);
+  if (z.hp <= 0) { killZombie(z); sfxKill(); kills++; }
 }
 
 // The RPG detonates asynchronously inside weapon.js; route that blast here too.
@@ -174,6 +208,8 @@ let mode = 'solo';        // 'solo' | 'multi'
 let mpActive = false;     // true while we're connected + playing multi
 let multiReady = false;   // in a room, waiting to click "play" (host or joiner)
 let mpWave = 0;           // shared wave number (host authoritative; joiner mirrors)
+let mpDead = false;       // multi: we're down, waiting for the next wave to respawn
+let mpAllDownCooldown = 0; // host: pause before restarting after everyone died
 const _fireDir = new THREE.Vector3();
 
 // Single net event router (lobby + game messages). Lobby events drive the
@@ -203,15 +239,22 @@ function netHandler(t, d) {
     return;
   }
   // --- game ---
-  if (t === 'left') onLeft(d.id);
+  if (t === 'left') { onLeft(d.id); dropKartForDriver(d.id); }
   else if (t === 'state') onState(d);
   else if (t === 'fire') onFire(d);
   else if (t === 'hit') applyLocalHit(d);
   else if (t === 'zstate') applyRemoteZombies(d.zs);
-  else if (t === 'wave') { mpWave = d.n; if (mpActive) showBanner('WAVE ' + d.n); }
+  else if (t === 'wave') {
+    mpWave = d.n;
+    if (!mpActive) return;
+    if (d.n === 1) restartRunLocal();      // everyone went down: run reset (joiner side)
+    else { if (mpDead) respawnMulti(); showBanner('WAVE ' + d.n); }
+  }
   else if (t === 'bite') applyLocalBite(d);
   else if (t === 'zhit' && getRole() === 'host') hostZombieHit(d);
   else if (t === 'boom') onBoom(d);
+  else if (t === 'kartmove' && getRole() === 'host' && d.driver !== getId()) receiveKartMove(d.k, d.x, d.z, d.dx, d.dz, d.driver);
+  else if (t === 'kartstate' && getRole() !== 'host') applyKartStates(d.ks);
   else if (t === 'error') setRoomStatus(d.message || 'Connection problem.');
   else if (t === 'disconnected') { setRoomStatus('Connection lost to the server.'); }
 }
@@ -226,6 +269,7 @@ function die() {
   sfxDeath();
   stopAmbient();
   controls.unlock();
+  ejectPlayer(); // don't stay seated in a kart while dead
   showDeath({ wave, kills, survivedLabel: formatTime(survived) });
 }
 
@@ -235,7 +279,9 @@ function startGame() {
   everStarted = true;
   setDead(false);
   player.hp = ZOMBIE_HP;
+  ejectPlayer();
   resetPlayer();
+  applySpawn(settings.spawn);
   resetRecoil();
   resetWeapon();
   wave = 1;
@@ -314,7 +360,7 @@ function hostMulti(dt, camera) {
         player.velocity.addScaledVector(dir, -kb);
         sfxHit();
         vignette.style.opacity = 0.9;
-        if (player.hp <= 0) respawnMulti();
+        if (player.hp <= 0) downInPlace();
       }
       sendBite(tid, tid, dmg, kb, dir);
     },
@@ -323,9 +369,18 @@ function hostMulti(dt, camera) {
   else {
     waveDelay += dt;
     if (waveDelay >= WAVE_CLEAR_DELAY) {
-      waveDelay = 0; wave++; cleanupWave(); spawnWave(wave); sendWave(wave); showBanner('WAVE ' + wave); sfxWave();
+      // Wave cleared: advance (or, after a run restart, start fresh on wave 2).
+      // Anyone still downed respawns at full HP for the new wave.
+      waveDelay = 0; wave++; cleanupWave(); spawnWave(wave); sendWave(wave);
+      showBanner('WAVE ' + wave); sfxWave();
+      if (mpDead) respawnMulti();
     }
   }
+  // Everyone down: pause a beat, then reset the whole run to Wave 1.
+  if (allPlayersDown()) {
+    mpAllDownCooldown += dt;
+    if (mpAllDownCooldown >= 2) { mpAllDownCooldown = 0; respawnAll(); }
+  } else mpAllDownCooldown = 0;
   hostZStateTimer += dt;
   if (hostZStateTimer >= 0.05) {
     hostZStateTimer = 0;
@@ -333,6 +388,8 @@ function hostMulti(dt, camera) {
       id: z.id, type: z.type, x: z.group.position.x, z: z.group.position.z,
       y: z.group.position.y, ry: z.group.rotation.y, hp: Math.round(z.hp), dead: z.dead,
     })));
+    // Stream the shared karts (positions + who's driving) on the same cadence.
+    sendKartState(hostKartsPayload(getId()));
   }
 }
 
@@ -369,7 +426,7 @@ function applyLocalBite(d) {
   if (bdx || bdz) player.velocity.addScaledVector(_biteDir.set(bdx, 0, bdz), -(d.kb || ZOMBIE_KNOCKBACK));
   sfxHit();
   vignette.style.opacity = 0.9;
-  if (player.hp <= 0) respawnMulti();
+  if (player.hp <= 0) downInPlace();
 }
 
 // Begin a multiplayer session (host: click "play" while in their lobby;
@@ -380,7 +437,9 @@ function beginMulti() {
   everStarted = true;
   setDead(false);
   player.hp = ZOMBIE_HP;
+  ejectPlayer();
   resetPlayer();
+  applySpawn(settings.spawn);
   resetRecoil();
   resetWeapon();
   survived = 0;
@@ -402,17 +461,65 @@ function applyLocalHit(d) {
   player.hp -= d.dmg;
   sfxHit();
   vignette.style.opacity = 0.9;
-  setTimeout(() => {
-    if (!dead) vignette.style.opacity = Math.max(0, 1 - player.hp / ZOMBIE_HP) * 0.5;
-  }, 120);
-  if (player.hp <= 0) respawnMulti();
+  if (player.hp <= 0) downInPlace();
 }
 
+// Respawn at full health for a (new) wave. Called when we were down and a
+// wave starts; the player is teleported to a spawn point and re-armed.
 function respawnMulti() {
   player.hp = ZOMBIE_HP;
+  mpDead = false;
+  ejectPlayer();
   resetPlayer();
+  applySpawn(settings.spawn);
   resetWeapon();   // fresh ammo + no stray rockets / reloads
   showBanner('YOU RESPAWNED');
+}
+
+// We died in multiplayer: stand down in place until the next wave. The player
+// is locked here (see the updatePlayer guard in update()) rather than
+// teleported, so the death reads as "down until the round ends."
+function downInPlace() {
+  player.hp = 0;
+  mpDead = true;
+  ejectPlayer();          // out of any kart
+  player.velocity.set(0, 0, 0);
+  vignette.style.opacity = 1;
+}
+
+// True when everyone in the room is dead this round (us + every connected peer
+// at 0 hp). The host uses this to restart the run after a brief pause.
+function allPlayersDown() {
+  if (!mpDead) return false;
+  for (const p of remotePositions()) if (p.hp > 0) return false;
+  return true;
+}
+
+// Everyone down: the host resets the shared horde to Wave 1 and tells the room,
+// then respawns itself. Joiners react to the 'wave:1' broadcast by calling
+// restartRunLocal() (no re-broadcast, so no loop). The session/room is kept.
+function respawnAll() {
+  wave = 1;
+  cleanupWave();
+  spawnWave(1);        // host is authoritative; joiners render this stream
+  sendWave(1);         // broadcast the reset to the joiners
+  restartRunLocal();
+}
+
+// The local half of a run reset: put *this* player back up for Wave 1. Called
+// by the host from respawnAll() and by joiners from the 'wave' handler. The
+// pointer stays locked (death never unlocks it), so a banner — not an overlay —
+// signals the restart and play resumes straight into Wave 1.
+function restartRunLocal() {
+  wave = 1;
+  mpDead = false;
+  player.hp = ZOMBIE_HP;
+  resetPlayer();
+  resetWeapon();
+  vignette.style.opacity = 0;
+  hideMultiLobby();
+  hideOverlay();
+  showBanner('NEW RUN — WAVE 1');
 }
 
 controls.addEventListener('lock', () => {
@@ -431,11 +538,43 @@ controls.addEventListener('unlock', () => {
 // (resume) or restarts after death. `multiReady` covers "in a room, waiting to
 // play" for both host and (re)joiners of a new room.
 overlay.addEventListener('click', () => {
+  // The settings panel (and its controls) swallow their own clicks, so reaching
+  // here means the user clicked an empty part of the overlay. If settings are
+  // open, close them instead of launching — the next click starts the game.
+  const settingsEl = document.getElementById('settings');
+  if (settingsEl && !settingsEl.classList.contains('hidden')) { settingsEl.classList.add('hidden'); return; }
   ensureAudio(); // first user gesture — unlock the AudioContext
+  applySettings(); // master gain just (re)created — push the saved volume in
   if (multiReady) start();
   else if (dead) start();
   else if (!everStarted) start();
   else if (!controls.isLocked) controls.lock();
+});
+
+// --- Settings --------------------------------------------------------------
+loadSettings();
+setControls(controls);
+applySettings();          // camera FOV, weapon FOV, audio volume, sensitivity
+setPvpEnabled(settings.pvp);
+setSettingsValues(settings);
+
+// Park the driveable karts in the arena (shared by solo + multi).
+spawnKarts();
+
+// A control changed: update state, persist, and apply the live systems.
+onSettingsChange((key, value) => {
+  settings[key] = value;
+  saveSettings();
+  if (key === 'pvp') setPvpEnabled(value);
+  else applySettings();
+});
+// Reset: restore defaults, reflect in the UI, persist, apply.
+onSettingsReset(() => {
+  Object.assign(settings, DEFAULTS);
+  saveSettings();
+  setPvpEnabled(settings.pvp);
+  applySettings();
+  setSettingsValues(settings);
 });
 
 // ---------------------------------------------------------------------------
@@ -443,7 +582,18 @@ overlay.addEventListener('click', () => {
 // ---------------------------------------------------------------------------
 function update(dt) {
   // --- Player movement (WASD relative to camera yaw) ---
-  updatePlayer(dt, camera);
+  // A downed player (multiplayer) is locked in place until the next wave.
+  if (!mpDead) updatePlayer(dt, camera);
+
+  // --- Karts: drive + collide + crush; the host also simulates remote karts
+  //     and joiners lerp them toward the host's stream (see karts.js).
+  //     Crush authority = solo or host (a joiner's kart is crushed by the host).
+  const isHostRole = mpActive && getRole() === 'host';
+  updateKarts(dt, {
+    isHost: isHostRole,
+    doCrush: !mpActive || isHostRole,
+    onKartCrush: handleKartCrush,
+  });
 
   // Forward (pre-recoil) for the weapon rig — matches the original, which
   // captured the view direction before the recoil kick was baked in.
@@ -507,11 +657,17 @@ function update(dt) {
   if (mpActive) {
     // _forward is the horizontal look direction (computed earlier this frame).
     const yaw = Math.atan2(_forward.x, _forward.z);
-    sendState(player.feet.x, player.feet.y, player.feet.z, yaw, player.hp);
+    sendState(player.feet.x, player.feet.y, player.feet.z, yaw, mpDead ? 0 : player.hp);
     updateRemotes(dt, camera);
     // Shared horde: the host simulates + streams; joiners render the stream.
     if (getRole() === 'host') hostMulti(dt, camera);
     else animateRemoteZombies(dt, camera);
+    // Joiners report where their kart is so the host can hold/crush it; the
+    // host instead streams the shared kart snapshot (see hostMulti above).
+    if (getRole() !== 'host') {
+      const ks = localKartNetState();
+      if (ks) sendKartMove(ks.kartId, ks.x, ks.z, ks.rx, ks.rz, getId());
+    }
   }
 
   // --- Auto-fire: full-auto weapons fire continuously while held ---
@@ -555,6 +711,13 @@ function animate() {
     weapon: getWeaponName(),
     ammo: ammo ? (ammo.reloading ? 'RELOADING' : `${ammo.mag}/${ammo.max}`) : '∞',
   });
+
+  // Climb / descend prompt: show the E keycap when the player is in range of
+  // a ladder (grounded and near a tower, or standing on a deck).
+  const inTowerRange = (playing && !dead) ? towerInRange(player.feet) : null;
+  setClimbHint(inTowerRange
+    ? (player.onTower ? '<kbd>E</kbd> descend' : '<kbd>E</kbd> climb')
+    : null);
 
   // Keep the sky dome centred on the player: follow position only, never
   // rotation, so the sky stays fixed in world space.

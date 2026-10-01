@@ -13,6 +13,7 @@ const playersValue = document.getElementById('players');
 const weaponName = document.getElementById('weapon-name');
 const weaponAmmo = document.getElementById('weapon-ammo');
 const banner = document.getElementById('banner');
+const climbHint = document.getElementById('climb-hint');
 const modeSolo = document.querySelector('#overlay [data-mode="solo"]');
 const modeMulti = document.querySelector('#overlay [data-mode="multi"]');
 const modeRow = document.getElementById('mode-row');
@@ -40,6 +41,68 @@ if (document.getElementById('room-create')) document.getElementById('room-create
 if (roomJoin) roomJoin.addEventListener('click', (e) => { e.stopPropagation(); roomActionCb && roomActionCb('join-code', roomJoinCode ? roomJoinCode.value : ''); });
 if (roomJoinCode) roomJoinCode.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); roomActionCb && roomActionCb('join-code', roomJoinCode.value); } });
 if (document.getElementById('room-back')) document.getElementById('room-back').addEventListener('click', (e) => { e.stopPropagation(); roomActionCb && roomActionCb('back'); });
+
+// --- Settings panel --------------------------------------------------------
+const settingsPanel = document.getElementById('settings');
+const settingsToggle = document.getElementById('settings-toggle');
+const setPvp = document.getElementById('set-pvp');
+const setSpawn = document.getElementById('set-spawn');
+const setVolume = document.getElementById('set-volume');
+const setSensitivity = document.getElementById('set-sensitivity');
+const setFov = document.getElementById('set-fov');
+const setVolumeVal = document.getElementById('set-volume-val');
+const setSensitivityVal = document.getElementById('set-sensitivity-val');
+const setFovVal = document.getElementById('set-fov-val');
+const setReset = document.getElementById('set-reset');
+
+let settingsChangeCb = null;  // (key, value) => void — main.js updates + persists
+let settingsResetCb = null;   // () => void — restore defaults
+export function onSettingsChange(fn) { settingsChangeCb = fn; }
+export function onSettingsReset(fn) { settingsResetCb = fn; }
+
+// Populate the controls from a settings object (call after load / on reset).
+export function setSettingsValues(s) {
+  if (setPvp) setPvp.checked = !!s.pvp;
+  if (setSpawn) setSpawn.value = s.spawn === 'random' ? 'random' : 'center';
+  if (setVolume) setVolume.value = Math.round(s.volume * 100);
+  if (setVolumeVal) setVolumeVal.textContent = Math.round(s.volume * 100) + '%';
+  if (setSensitivity) setSensitivity.value = Math.round(s.sensitivity * 100);
+  if (setSensitivityVal) setSensitivityVal.textContent = s.sensitivity.toFixed(2);
+  if (setFov) setFov.value = Math.round(s.fov);
+  if (setFovVal) setFovVal.textContent = Math.round(s.fov) + '\u00B0';
+}
+
+// The whole panel lives inside the start-overlay, whose click starts the game.
+// Swallow clicks here so the controls work without launching/resuming.
+if (settingsToggle) settingsToggle.addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (settingsPanel) settingsPanel.classList.toggle('hidden');
+});
+if (settingsPanel) settingsPanel.addEventListener('click', (e) => e.stopPropagation());
+
+// The keybind grid is hidden by default; "Key bindings" toggles it on/off.
+const keysToggle = document.getElementById('keys-toggle');
+const keysRow = document.getElementById('keys-row');
+if (keysToggle) keysToggle.addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (keysRow) keysRow.classList.toggle('hidden');
+});
+if (setPvp) setPvp.addEventListener('change', () => settingsChangeCb && settingsChangeCb('pvp', setPvp.checked));
+if (setSpawn) setSpawn.addEventListener('change', () => settingsChangeCb && settingsChangeCb('spawn', setSpawn.value));
+if (setVolume) setVolume.addEventListener('input', () => {
+  if (setVolumeVal) setVolumeVal.textContent = setVolume.value + '%';
+  settingsChangeCb && settingsChangeCb('volume', Number(setVolume.value) / 100);
+});
+if (setSensitivity) setSensitivity.addEventListener('input', () => {
+  const v = Number(setSensitivity.value) / 100;
+  if (setSensitivityVal) setSensitivityVal.textContent = v.toFixed(2);
+  settingsChangeCb && settingsChangeCb('sensitivity', v);
+});
+if (setFov) setFov.addEventListener('input', () => {
+  if (setFovVal) setFovVal.textContent = setFov.value + '\u00B0';
+  settingsChangeCb && settingsChangeCb('fov', Number(setFov.value));
+});
+if (setReset) setReset.addEventListener('click', (e) => { e.stopPropagation(); settingsResetCb && settingsResetCb(); });
 
 /** Show the multiplayer lobby (create a room, or type a code to join). */
 export function showMultiLobby() {
@@ -83,8 +146,11 @@ export function showOverlay(title, sub) {
   overlay.querySelector('h1').innerHTML = title;
   const p = overlay.querySelector('p');
   if (p) p.innerHTML = sub;
-const cta = overlay.querySelector('.cta');
-    if (cta) cta.textContent = isDead ? 'Click to try again' : 'Click to play';
+  // Default the call-to-action to the normal label ("Click to play") unless
+  // this is a genuine death screen, so callers (e.g. the multiplayer run
+  // restart) don't have to remember to reset it themselves.
+  const cta = overlay.querySelector('.cta');
+  if (cta) cta.textContent = isDead ? 'Click to try again' : 'Click to play';
   overlay.classList.remove('hidden');
 }
 
@@ -123,6 +189,17 @@ export function updateHUD(stats) {
     weaponAmmo.textContent = stats.ammo;
     weaponAmmo.classList.toggle('reloading', String(stats.ammo).toUpperCase() === 'RELOADING');
   }
+}
+
+/**
+ * Show/hide the contextual climb prompt near the crosshair. `html` may include
+ * a <kbd> for the keycap; pass null to hide.
+ */
+export function setClimbHint(html) {
+  if (!climbHint) return;
+  if (!html) { climbHint.classList.remove('show'); return; }
+  climbHint.innerHTML = html;
+  climbHint.classList.add('show');
 }
 
 /**

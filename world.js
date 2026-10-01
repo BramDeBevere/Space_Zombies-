@@ -159,15 +159,18 @@ scene.add(moon.target);
     // extra cover spread across the larger arena
     [-40, -32], [44, -18], [34, 40], [-38, 34], [2, -46], [50, 12], [-22, -44],
   ];
-  const CRATE_COLLIDE = 1.65; // circumscribed radius of the 2x2 face, so rotation is covered
+  // Low crates — small enough that a jump clears them (max jump ≈1.4u).
+  const CRATE_SIZE = 1.4;        // edge length of the (square) crate
+  const CRATE_H = 1.0;           // low enough to hop over (jump peak ≈1.4u)
+  const CRATE_COLLIDE = (CRATE_SIZE / 2) * Math.SQRT2 + 0.15; // circumscribed radius + buffer
   for (const [x, z] of cratePositions) {
-    const crate = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2), crateMat);
-    crate.position.set(x, 1, z);
+    const crate = new THREE.Mesh(new THREE.BoxGeometry(CRATE_SIZE, CRATE_H, CRATE_SIZE), crateMat);
+    crate.position.set(x, CRATE_H / 2, z);
     crate.rotation.y = Math.random() * Math.PI;
     crate.castShadow = true;
     crate.receiveShadow = true;
     scene.add(crate);
-    obstacles.push({ x, z, r: CRATE_COLLIDE });
+    obstacles.push({ x, z, r: CRATE_COLLIDE, top: CRATE_H });
   }
 }
 
@@ -452,7 +455,7 @@ function addBulbLight(x, y, z, radius = 22, intensity = 26) {
     const band = new THREE.Mesh(barrelBand, barrelDark);
     b.add(band);
     scene.add(b);
-    obstacles.push({ x, z, r: 0.7 });
+    obstacles.push({ x, z, r: 0.7, top: 1.2 }); // jumpable (matches the 1.2u barrel)
   }
 
   // A low concrete L-barrier near the middle for quick cover.
@@ -470,13 +473,15 @@ function addBulbLight(x, y, z, radius = 22, intensity = 26) {
   // A few more crates, tucked into previously empty open spots.
   const crateMat2 = new THREE.MeshStandardMaterial({ color: 0x6a5e4a, roughness: 0.9 });
   const extraCrateSpots = [[-2, 38], [8, 30], [52, -26], [-52, 10]];
+  const ECRATE_SIZE = 1.4, ECRATE_H = 1.0; // same low size as the main crates
+  const ECRATE_COLLIDE = (ECRATE_SIZE / 2) * Math.SQRT2 + 0.15;
   for (const [x, z] of extraCrateSpots) {
-    const c = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2), crateMat2);
-    c.position.set(x, 1, z);
+    const c = new THREE.Mesh(new THREE.BoxGeometry(ECRATE_SIZE, ECRATE_H, ECRATE_SIZE), crateMat2);
+    c.position.set(x, ECRATE_H / 2, z);
     c.rotation.y = Math.random() * Math.PI;
     c.castShadow = c.receiveShadow = true;
     scene.add(c);
-    obstacles.push({ x, z, r: 1.65 });
+    obstacles.push({ x, z, r: ECRATE_COLLIDE, top: ECRATE_H });
   }
 }
 

@@ -6,6 +6,11 @@ import { ARENA_HALF, scene, obstacles, towers } from './world.js';
 const ZOMBIE_RADIUS = 0.6;
 const ZOMBIE_SPEED = 3.2;
 const ZOMBIE_ACCEL = 2.2;       // how quickly the zombie speeds up (chase)
+// Obstacle avoidance / stuck detection.
+const AVOID_RAMP = 1.6;         // how fast the avoidance angle grows while blocked (rad/s)
+const AVOID_MAX = 1.5;         // max avoidance angle (~86 deg) — a wide arc around cover
+const AVOID_DECAY = 2.2;       // how fast it unwinds once the path is clear (rad/s)
+const STUCK_KILL_TIME = 60;    // seconds with no forward progress before a zombie gives up and dies
 export const ZOMBIE_HP = 100;
 const HIT_RANGE = 1.5;          // horizontal distance within which a zombie can hit
 const HIT_COOLDOWN = 0.8;      // seconds between a zombie's bites
@@ -230,6 +235,16 @@ function makeZombie(x, z, speed, id, type = 'medium') {
     fly: !!c.fly,  // airborne archetype: chases through the air, no ground physics
     hoverBase: c.hover || 2.2,
     vy: 0,
+    // Obstacle avoidance: when a zombie is wedged behind cover it steers
+    // around it instead of pushing straight in. stuckTimer is the cumulative
+    // seconds the zombie has been blocked; avoidAngle is the lateral offset
+    // applied to its chase direction; avoidDir is which side it's currently
+    // steering toward (flips if still stuck after a couple of seconds).
+    stuckTimer: 0,
+    avoidAngle: 0,
+    avoidDir: Math.random() < 0.5 ? 1 : -1,
+    prevPX: x,  // last frame's position (for stuck detection)
+    prevPZ: z,
   };
   // Back-reference each mesh to its zombie so raycasts can resolve the target.
   group.traverse((o) => { if (o.isMesh) o.userData.zombie = zo; });
@@ -403,15 +418,42 @@ export function animateZombies(dt, ctx) {
       } else if (z.fly) {
         updateFlyingZombie(z, dt, tx, tz, ty, _toZombie, dist);
       } else {
-        // Accelerate up to this zombie's speed while chasing.
-        const targetSpeed = z.speed * Math.min(1, dist / 6 + 0.4);
-        z.velocity.addScaledVector(_toZombie, ZOMBIE_ACCEL * dt * targetSpeed);
-        if (z.velocity.length() > targetSpeed) z.velocity.setLength(targetSpeed);
-        z.group.position.addScaledVector(z.velocity, dt);
+        const pos = z.group.position;
 
-        // Face the player while moving.
+        // Stuck detection: the zombie has real speed but is barely moving
+        // (it keeps getting shoved back out of cover by resolveZombieObstacles).
+        const speedNow = z.velocity.length();
+        const moved = Math.hypot(pos.x - z.prevPX, pos.z - z.prevPZ);
+        const blocked = speedNow > z.speed * 0.35 && moved < z.speed * dt * 0.5;
+        if (blocked) {
+          z.stuckTimer += dt;
+          // Swing around the obstacle. A full arc that didn't free it means we
+          // hit the far side too — flip and try the other direction.
+          z.avoidAngle += AVOID_RAMP * dt;
+          if (z.avoidAngle >= AVOID_MAX) { z.avoidDir *= -1; z.avoidAngle = 0; }
+        } else {
+          z.stuckTimer = 0;
+          z.avoidAngle = Math.max(0, z.avoidAngle - AVOID_DECAY * dt);
+          if (z.avoidAngle < 0.03) z.avoidAngle = 0;
+        }
+
+        // Steer around cover: rotate the raw chase direction by the avoidance
+        // angle so a blocked zombie arcs around the obstacle instead of pushing
+        // straight into it forever.
+        const steer = z.avoidAngle * z.avoidDir;
+        const cs = Math.cos(steer), sn = Math.sin(steer);
+        const sx = _toZombie.x * cs - _toZombie.z * sn;
+        const sz = _toZombie.x * sn + _toZombie.z * cs;
+
+        const targetSpeed = z.speed * Math.min(1, dist / 6 + 0.4);
+        z.velocity.x += sx * ZOMBIE_ACCEL * dt * targetSpeed;
+        z.velocity.z += sz * ZOMBIE_ACCEL * dt * targetSpeed;
+        if (z.velocity.length() > targetSpeed) z.velocity.setLength(targetSpeed);
+        pos.addScaledVector(z.velocity, dt);
+
+        // Face where we're actually heading.
         if (z.velocity.lengthSq() > 0.01) {
-          const targetAngle = Math.atan2(_toZombie.x, _toZombie.z);
+          const targetAngle = Math.atan2(z.velocity.x, z.velocity.z);
           const cur = z.group.rotation.y;
           let delta = targetAngle - cur;
           while (delta > Math.PI) delta -= Math.PI * 2;
@@ -421,14 +463,21 @@ export function animateZombies(dt, ctx) {
 
         // Keep the zombie inside the arena and out of cover (crates / posts).
         const zlim = ARENA_HALF - ZOMBIE_RADIUS;
-        z.group.position.x = Math.max(-zlim, Math.min(zlim, z.group.position.x));
-        z.group.position.z = Math.max(-zlim, Math.min(zlim, z.group.position.z));
-        z.group.position.y = 0;
-        resolveZombieObstacles(z.group.position, z.radius);
+        pos.x = Math.max(-zlim, Math.min(zlim, pos.x));
+        pos.z = Math.max(-zlim, Math.min(zlim, pos.z));
+        pos.y = 0;
+        resolveZombieObstacles(pos, z.radius);
 
         // Grab a nearby tower's stairs to climb up after an elevated target.
-        const t = nearestTower(z.group.position);
+        const t = nearestTower(pos);
         if (t && ty > t.deckTop - 2.0) z.climb = { tower: t, t: 0 };
+
+        // Safety net: a zombie that can't make progress for a long time gives up.
+        if (z.stuckTimer > STUCK_KILL_TIME) killZombie(z);
+
+        // Record position for next frame's stuck detection.
+        z.prevPX = pos.x;
+        z.prevPZ = pos.z;
       }
 
       // Simple limb shuffle (per-zombie phase so they don't move in unison).

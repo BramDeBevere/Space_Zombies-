@@ -6,6 +6,8 @@ import { ZOMBIE_HP } from './zombie.js';
 
 const WALK_SPEED = 5.5;
 const SPRINT_SPEED = 9.5;
+const CROUCH_SPEED = 2.6;  // m/s while crouching (about half of walk speed)
+const CROUCH_EYE = 1.05;   // camera height above the feet while crouched
 const GRAVITY = 26;        // downward acceleration (units/s^2)
 const JUMP_VELOCITY = 8.5; // initial upward velocity when jumping
 const CLIMB_SPEED = 4.2;   // m/s up/down the ladder
@@ -17,6 +19,8 @@ const player = {
   onGround: true, // true while standing on the floor
   onTower: null,  // the watchtower deck we're standing on (null when on the ground)
   climb: null,    // { tower, mode:'up'|'down' } while riding the ladder
+  eyeH: EYE_HEIGHT, // current (eased) camera height above the feet
+  kartDriver: null,  // index of the kart being driven (karts.js owns the sim)
   hp: ZOMBIE_HP,
 };
 
@@ -36,9 +40,12 @@ function clampToArena(p) {
 }
 
 // Push the player out of any obstacle: a circle ({r}) or an axis-aligned box
-// ({box:true, halfX, halfZ}) in top-down (x, z).
+// ({box:true, halfX, halfZ}) in top-down (x, z). Low obstacles tagged with a
+// `top` height are ignored while the player's feet are above that height, so
+// crates / barrels can be hopped over instead of always blocking the path.
 function resolveObstacles(p) {
   for (const o of obstacles) {
+    if (o.top != null && p.y >= o.top) continue; // airborne over this obstacle
     if (o.box) {
       const nx = Math.max(o.x - o.halfX, Math.min(p.x, o.x + o.halfX));
       const nz = Math.max(o.z - o.halfZ, Math.min(p.z, o.z + o.halfZ));
@@ -81,6 +88,13 @@ function resolveObstacles(p) {
  * be climbed (E) up onto the deck and back down.
  */
 function updatePlayer(dt, camera) {
+  // While driving a kart, karts.js owns the camera + feet: skip the on-foot
+  // sim entirely (movement, climb, crouch) for this frame.
+  if (player.kartDriver != null) {
+    eHeld = false;
+    return;
+  }
+
   _forward.set(0, 0, 0);
   camera.getWorldDirection(_forward);
   _forward.y = 0;
@@ -90,26 +104,31 @@ function updatePlayer(dt, camera) {
   _right.crossVectors(_forward, camera.up).normalize();
 
   const ePressed = !!keys['KeyE'] && !eHeld;
+  const crouching = keys['KeyC'] || keys['ControlLeft'] || keys['ControlRight'];
 
   if (player.climb) updateClimb(dt);
-  else if (player.onTower) updateOnTower(dt, ePressed);
-  else updateGround(dt, ePressed);
+  else if (player.onTower) updateOnTower(dt, ePressed, crouching);
+  else updateGround(dt, ePressed, crouching);
 
   eHeld = !!keys['KeyE'];
 
-  camera.position.set(player.feet.x, EYE_HEIGHT + player.feet.y, player.feet.z);
+  // Ease the camera between standing and crouched height, then place it.
+  const targetEye = crouching ? CROUCH_EYE : EYE_HEIGHT;
+  player.eyeH += (targetEye - player.eyeH) * Math.min(1, dt * 12);
+  camera.position.set(player.feet.x, player.eyeH + player.feet.y, player.feet.z);
 }
 
 // --- On the ground: normal WASD + gravity + jump, and E to start a climb ---
-function updateGround(dt, ePressed) {
+function updateGround(dt, ePressed, crouching) {
   _move.set(0, 0, 0);
   if (keys['KeyW']) _move.add(_forward);
   if (keys['KeyS']) _move.sub(_forward);
   if (keys['KeyD']) _move.add(_right);
   if (keys['KeyA']) _move.sub(_right);
 
-  const sprinting = keys['ShiftLeft'] || keys['ShiftRight'];
-  const speed = sprinting ? SPRINT_SPEED : WALK_SPEED;
+  // Crouching slows you down and cancels sprint — you can't do both at once.
+  const sprinting = !crouching && (keys['ShiftLeft'] || keys['ShiftRight']);
+  const speed = crouching ? CROUCH_SPEED : sprinting ? SPRINT_SPEED : WALK_SPEED;
   if (_move.lengthSq() > 0) {
     _move.normalize().multiplyScalar(speed);
   }
@@ -121,8 +140,8 @@ function updateGround(dt, ePressed) {
   clampToArena(player.feet);
   resolveObstacles(player.feet);
 
-  // --- Vertical: gravity + jump (Space) ---
-  if (player.onGround && keys['Space']) {
+  // --- Vertical: gravity + jump (Space) — no jumping while crouching ---
+  if (player.onGround && keys['Space'] && !crouching) {
     player.vy = JUMP_VELOCITY;
     player.onGround = false;
   }
@@ -142,7 +161,7 @@ function updateGround(dt, ePressed) {
 }
 
 // --- Standing on a watchtower deck: walk within the railings, E to descend ---
-function updateOnTower(dt, ePressed) {
+function updateOnTower(dt, ePressed, crouching) {
   const t = player.onTower;
   player.onGround = true;
 
@@ -151,7 +170,7 @@ function updateOnTower(dt, ePressed) {
   if (keys['KeyS']) _move.sub(_forward);
   if (keys['KeyD']) _move.add(_right);
   if (keys['KeyA']) _move.sub(_right);
-  if (_move.lengthSq() > 0) _move.normalize().multiplyScalar(WALK_SPEED);
+  if (_move.lengthSq() > 0) _move.normalize().multiplyScalar(crouching ? CROUCH_SPEED : WALK_SPEED);
 
   player.velocity.lerp(_move, 1 - Math.pow(0.0001, dt));
   player.feet.addScaledVector(player.velocity, dt);
@@ -205,14 +224,26 @@ function nearestTower(p) {
   for (const t of towers) {
     const dx = p.x - t.x, dz = p.z - t.z;
     const d = Math.hypot(dx, dz);
-    if (d > t.baseR + PLAYER_RADIUS + 0.6) continue;
-    // Must be on the ladder's side (within a front-facing arc of it).
+    // Lenient reach: the ladder faces the arena centre, so allow approaching
+    // from a wide arc (nearly the whole front hemisphere) and from a bit
+    // further back than the base collider — climbing should never feel
+    // finicky.
+    if (d > t.baseR + PLAYER_RADIUS + 2.2) continue;
     const inv = 1 / (d || 1e-4);
     const facing = dx * inv * t.ux + dz * inv * t.uz;
-    if (facing < 0.15) continue;
+    if (facing < -0.35) continue;
     if (d < bestD) { bestD = d; best = t; }
   }
   return best;
+}
+
+// The tower the player can act on right now (climb up from the ground, or
+// descend from the deck they're standing on), or null. Drives both the climb
+// prompt in the HUD and is what a fresh E-press looks up.
+export function towerInRange(p) {
+  if (player.onTower) return player.onTower;      // on a deck -> can descend
+  if (!player.onGround) return null;             // mid-air / climbing -> nothing
+  return nearestTower(p);                         // grounded -> nearest reachable
 }
 
 // Snap the player onto the ladder and start moving `mode` ('up' | 'down').
@@ -236,7 +267,41 @@ function resetPlayer() {
   player.onGround = true;
   player.onTower = null;
   player.climb = null;
+  player.eyeH = EYE_HEIGHT; // stand tall on (re)spawn
+  player.kartDriver = null; // never (re)spawn while seated in a kart
   eHeld = false;
+}
+
+// Pick a ground spawn point that isn't inside an obstacle or watchtower base.
+// Returns null when the caller should fall back to the arena centre.
+function isClearSpot(x, z) {
+  for (const o of obstacles) {
+    const d = o.box
+      ? Math.max(Math.abs(x - o.x) - o.halfX, Math.abs(z - o.z) - o.halfZ, 0)
+      : Math.hypot(x - o.x, z - o.z) - o.r;
+    if (d < PLAYER_RADIUS + 0.3) return false;
+  }
+  for (const t of towers) {
+    if (Math.hypot(x - t.x, z - t.z) < (t.baseR || 3) + PLAYER_RADIUS + 0.5) return false;
+  }
+  return true;
+}
+
+/**
+ * Apply a spawn position to the player. `mode` is 'center' or 'random'; for
+ * 'random' it samples open ground points until one clears (bounded attempts,
+ * falling back to the centre).
+ */
+export function applySpawn(mode) {
+  if (mode === 'random') {
+    const lim = ARENA_HALF - PLAYER_RADIUS - 2;
+    for (let i = 0; i < 40; i++) {
+      const x = (Math.random() * 2 - 1) * lim;
+      const z = (Math.random() * 2 - 1) * lim;
+      if (isClearSpot(x, z)) { player.feet.x = x; player.feet.z = z; return; }
+    }
+  }
+  player.feet.set(0, 0, 0);
 }
 
 export { player, keys, updatePlayer, resetPlayer };
