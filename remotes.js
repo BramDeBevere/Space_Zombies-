@@ -3,10 +3,23 @@
 // network positions and locally draw their tracers so they look like you do.
 import * as THREE from 'three';
 import { scene } from './world.js';
-import { BULLET_DAMAGE } from './weapon.js';
+import { playRemoteShotSfx, vfxRemoteBoom } from './weapon.js';
 
 const remotes = new Map(); // id -> remote
 const _dir = new THREE.Vector3();
+
+// Deterministic colour per player: hash the (stable) peer id into a hue so the
+// same player always renders in the same colour on every client.
+const _tmpColor = new THREE.Color();
+function colorForId(id) {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0;
+  const hue = ((h >>> 0) % 360) / 360;
+  const base = _tmpColor.setHSL(hue, 0.62, 0.52).getHex();
+  const skin = _tmpColor.setHSL(hue, 0.60, 0.70).getHex();
+  const accent = _tmpColor.setHSL(hue, 0.95, 0.55).getHex();
+  return { base, skin, accent, emissive: accent };
+}
 
 export function remoteCount() { return remotes.size; }
 
@@ -17,15 +30,31 @@ export function positions() {
   return out;
 }
 
+// Every remote character as { id, group } — used by the weapon raycaster.
+export function playerMeshes() {
+  const out = [];
+  for (const r of remotes.values()) out.push({ id: r.id, group: r.group });
+  return out;
+}
+
+// Apply damage to a specific remote player (a shot that lands on them).
+export function damageRemote(id, dmg) {
+  const r = remotes.get(id);
+  if (!r) return;
+  r.hp = Math.max(0, r.hp - dmg);
+  updateRemoteBar(r);
+}
+
 // Shared transient-effect list for remote tracers.
 const effects = [];
 
 // --- One remote player -----------------------------------------------------
 function makeRemote(id) {
   const group = new THREE.Group();
-  const mat = new THREE.MeshStandardMaterial({ color: 0x2f7fd0, roughness: 0.6, metalness: 0.1 });
-  const skin = new THREE.MeshStandardMaterial({ color: 0x5fb6ff, roughness: 0.7 });
-  const accent = new THREE.MeshStandardMaterial({ color: 0x0b1220, emissive: 0x58c7ff, emissiveIntensity: 2.4 });
+  const c = colorForId(id);
+  const mat = new THREE.MeshStandardMaterial({ color: c.base, roughness: 0.6, metalness: 0.1 });
+  const skin = new THREE.MeshStandardMaterial({ color: c.skin, roughness: 0.7 });
+  const accent = new THREE.MeshStandardMaterial({ color: 0x0b1220, emissive: c.emissive, emissiveIntensity: 2.4 });
 
   const body = new THREE.Mesh(new THREE.BoxGeometry(0.7, 1.0, 0.42), mat);
   body.position.y = 1.05; body.castShadow = true;
@@ -41,10 +70,12 @@ function makeRemote(id) {
   scene.add(group);
 
   const bar = makeHealthBar();
+  bar.fill.material.color.set(c.base);
   scene.add(bar.group);
 
   return {
     id,
+    color: c.base,
     group,
     healthBar: bar,
     target: new THREE.Vector3(group.position.x, 0, group.position.z),
@@ -106,8 +137,26 @@ export function onState(d) {
   updateRemoteBar(r);
 }
 
+// A peer fired: draw their tracers + play their gun sound (weapon-aware).
 export function onFire(d) {
-  spawnRemoteTracer(d.ox, d.oy, d.oz, d.ex, d.ey, d.ez);
+  if (!d) return;
+  const wId = d.wId || 'pistol';
+  for (const t of d.tr || []) {
+    if (typeof t.fx === 'number') {
+      const a = new THREE.Vector3(t.fx, t.fy, t.fz);
+      const b = new THREE.Vector3(t.tx, t.ty, t.tz);
+      spawnRemoteTracer(a, b, wId);
+    } else if (t.from && t.to) {
+      spawnRemoteTracer(t.from, t.to, wId);
+    }
+  }
+  playRemoteShotSfx(wId, d.melee);
+}
+
+// A peer's RPG detonated: show the blast VFX.
+export function onBoom(d) {
+  if (!d) return;
+  vfxRemoteBoom(d.x, d.y, d.z, d.r);
 }
 
 /** Remove every remote (used when the connection drops). */
@@ -128,7 +177,7 @@ function disposeRemote(r) {
 function updateRemoteBar(r) {
   const pct = Math.max(0, r.hp) / 100;
   r.healthBar.fill.scale.x = pct;
-  r.healthBar.fill.material.color.set(pct > 0.5 ? 0x5fb6ff : pct > 0.25 ? 0xffd36e : 0xff5a5e);
+  r.healthBar.fill.material.color.set(pct > 0.5 ? r.color : pct > 0.25 ? 0xffd36e : 0xff5a5e);
 }
 
 // --- Per-frame update (called from the game loop) --------------------------
@@ -170,35 +219,15 @@ function setRemoteOpacity(r, o) {
   r.healthBar.fill.material.opacity = o;
 }
 
-// --- Local player shoots at remotes ----------------------------------------
-// Raycast from the camera centre against every remote character and apply
-// damage to the first one hit. Returns { id, dmg, point } or null.
-const _centerNDC = new THREE.Vector2(0, 0);
-const _shotRay = new THREE.Raycaster();
-export function applyShot(camera) {
-  _shotRay.setFromCamera(_centerNDC, camera);
-  const targets = [];
-  for (const r of remotes.values()) {
-    r.group.traverse((o) => { if (o.isMesh) { o.userData.remote = r; targets.push(o); } });
-  }
-  if (!targets.length) return null;
-  const hits = _shotRay.intersectObjects(targets, false);
-  if (!hits.length) return null;
-  const r = hits[0].object.userData.remote;
-  if (!r) return null;
-  r.hp = Math.max(0, r.hp - BULLET_DAMAGE);
-  updateRemoteBar(r);
-  return { id: r.id, dmg: BULLET_DAMAGE, point: hits[0].point };
-}
-
 // --- Remote tracers (look identical to local shots) ------------------------
-function spawnRemoteTracer(ox, oy, oz, ex, ey, ez) {
-  const a = new THREE.Vector3(ox, oy, oz);
-  const b = new THREE.Vector3(ex, ey, ez);
+// (a, b) are world-space THREE.Vector3; wId picks the tracer tint/weight.
+function spawnRemoteTracer(a, b, wId) {
   const len = a.distanceTo(b);
   if (len < 0.1) return;
-  const geo = new THREE.BoxGeometry(0.04, 0.04, len);
-  const mat = new THREE.MeshBasicMaterial({ color: 0xbfe8ff, transparent: true, opacity: 0.9, toneMapped: false });
+  const color = wId === 'knife' ? 0xcfe8ff : wId === 'rpg' ? 0xffc080 : 0xbfe8ff;
+  const thick = wId === 'rpg' ? 2.6 : 1;
+  const geo = new THREE.BoxGeometry(0.04 * thick, 0.04 * thick, len);
+  const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.9, toneMapped: false });
   const m = new THREE.Mesh(geo, mat);
   m.position.copy(a).add(b).multiplyScalar(0.5);
   m.lookAt(b);

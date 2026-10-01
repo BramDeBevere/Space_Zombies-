@@ -28,6 +28,15 @@
       background: linear-gradient(90deg, #28d17a, #58f0a0); transition: width 0.15s linear, background 0.2s; }
     #hpvalue { margin-top: 3px; font-size: 12px; color: #9fb0c4; }
 
+    /* Weapon + ammo readout, bottom-right */
+    #weapon-hud { position: fixed; right: 22px; bottom: 40px; z-index: 5; pointer-events: none;
+      display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+    #weapon-name { font-size: 15px; font-weight: 700; letter-spacing: 2px; color: #8fd0ff;
+      text-transform: uppercase; text-shadow: 0 0 12px rgba(120,180,255,0.35); }
+    #weapon-ammo { font-size: 30px; font-weight: 800; font-variant-numeric: tabular-nums;
+      color: #eaf1fb; text-shadow: 0 0 14px rgba(120,180,255,0.3); line-height: 1; }
+    #weapon-ammo.reloading { color: #ffd36e; animation: pulse 0.9s ease-in-out infinite; }
+
     /* Center overlay (click to play / death) */
     #overlay { position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column;
       align-items: center; justify-content: center; text-align: center; cursor: pointer;
@@ -58,6 +67,12 @@
       margin: 14px 0 4px; min-width: 260px; }
     #overlay .room-opts { display: flex; flex-direction: column; gap: 10px; align-items: center; }
     #overlay .room-opts.hidden { display: none; }
+    #overlay .room-join { display: flex; gap: 8px; align-items: center; justify-content: center; }
+    #overlay #room-join-code { width: 150px; padding: 10px 12px; border-radius: 10px;
+      border: 1px dashed rgba(120,200,255,0.5); background: rgba(0,0,0,0.35); color: #58c7ff;
+      font: inherit; font-weight: 800; letter-spacing: 6px; text-transform: uppercase; text-align: center; }
+    #overlay #room-join-code:focus { outline: none; border-color: #58c7ff; background: rgba(20,40,60,0.5); }
+    #overlay .room-join-hint { font-size: 11px; color: #7f8fa3; margin-top: 2px; }
     #overlay .btn { padding: 10px 18px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.25);
       background: rgba(255,255,255,0.06); color: #eaf1fb; font: inherit; font-weight: 700;
       cursor: pointer; transition: all 0.15s; }
@@ -65,11 +80,6 @@
     #overlay .btn.primary { background: #2f7fd0; border-color: #2f7fd0; color: #fff; }
     #overlay .btn.primary:hover { background: #3a90e8; }
     #overlay .btn.ghost { background: transparent; color: #8ea0b6; }
-    #overlay .join-row { display: flex; gap: 8px; align-items: center; }
-    #overlay .code-input { width: 140px; padding: 10px 12px; border-radius: 10px;
-      border: 1px solid rgba(255,255,255,0.25); background: rgba(0,0,0,0.4); color: #eaf1fb;
-      font: inherit; font-weight: 700; letter-spacing: 4px; text-transform: uppercase; text-align: center; }
-    #overlay .code-input:focus { outline: none; border-color: #58c7ff; }
     #overlay .room-ready { display: flex; flex-direction: column; align-items: center; gap: 6px; }
     #overlay .room-ready.hidden { display: none; }
     #overlay .room-code-label { font-size: 11px; letter-spacing: 2px; text-transform: uppercase; color: #6f7f95; }
@@ -79,10 +89,47 @@
     #overlay .room-hint { font-size: 12px; color: #7f8fa3; }
     #overlay .room-status { font-size: 13px; color: #ffd36e; min-height: 18px; }
 
+    /* Live room browser */
+    #overlay .room-list { display: flex; flex-direction: column; gap: 8px; width: 300px;
+      max-height: 220px; overflow-y: auto; margin-bottom: 4px; }
+    #overlay .room-row { display: flex; align-items: center; justify-content: space-between;
+      gap: 10px; padding: 10px 14px; border-radius: 10px; cursor: pointer;
+      border: 1px solid rgba(255,255,255,0.14); background: rgba(255,255,255,0.05);
+      transition: all 0.12s; }
+    #overlay .room-row:hover { background: rgba(88,199,255,0.14); border-color: #58c7ff; }
+    #overlay .room-row.disabled { opacity: 0.4; cursor: not-allowed; }
+    #overlay .room-row .name { font-weight: 700; color: #eaf1fb; letter-spacing: 0.5px; }
+    #overlay .room-row .name small { display: block; font-weight: 500; font-size: 11px;
+      color: #7f8fa3; letter-spacing: 0; margin-top: 2px; }
+    #overlay .room-row .count { font-size: 12px; font-weight: 700; color: #58c7ff;
+      white-space: nowrap; }
+    #overlay .room-empty { font-size: 13px; color: #7f8fa3; text-align: center; padding: 14px 0; }
+
     #dead-title { color: #ff5a6e !important; text-shadow: 0 0 24px rgba(255,70,90,0.6) !important; }
     #vignette { position: fixed; inset: 0; pointer-events: none; z-index: 4; opacity: 0;
       background: radial-gradient(120% 100% at 50% 50%, transparent 55%, rgba(120,0,0,0.55) 100%);
       transition: opacity 0.2s; }
+    /* Sniper scope / iron sight. #scope is hidden by default; main.js sets its
+       opacity from scopeProgress() each frame so it fades with the zoom. */
+    #scope { position: fixed; inset: 0; z-index: 7; pointer-events: none; opacity: 0; }
+    #scope .scope-vig { position: absolute; inset: 0;
+      background: radial-gradient(circle at 50% 50%, transparent 24%, rgba(0,0,0,0.92) 42%, #000 60%); }
+    #scope .scope-cross-h, #scope .scope-cross-v { position: absolute; left: 50%; top: 50%;
+      background: rgba(6,10,6,0.85); box-shadow: 0 0 1px rgba(140,255,170,0.5); }
+    #scope .scope-cross-h { width: 60vmax; height: 1.5px; transform: translate(-50%,-50%); }
+    #scope .scope-cross-v { width: 1.5px; height: 60vmax; transform: translate(-50%,-50%); }
+    #scope .scope-dot { position: absolute; left: 50%; top: 50%; width: 5px; height: 5px;
+      transform: translate(-50%,-50%); border-radius: 50%;
+      background: #0c2410; box-shadow: 0 0 2px rgba(150,255,190,0.7); }
+    #scope .scope-ring { position: absolute; left: 50%; top: 50%; width: 24px; height: 24px;
+      transform: translate(-50%,-50%); border: 1.5px solid rgba(160,255,190,0.35);
+      border-radius: 50%; }
+    #scope .scope-corner { position: absolute; width: 46px; height: 46px;
+      border: 3px solid rgba(220,235,220,0.9); box-shadow: 0 0 4px rgba(120,255,170,0.25); }
+    #scope .scope-corner.tl { left: 2.5%; top: 6%;  border-right: none; border-bottom: none; border-top-left-radius: 10px; }
+    #scope .scope-corner.tr { right: 2.5%; top: 6%;  border-left: none;  border-bottom: none; border-top-right-radius: 10px; }
+    #scope .scope-corner.bl { left: 2.5%; bottom: 6%; border-right: none; border-top: none;    border-bottom-left-radius: 10px; }
+    #scope .scope-corner.br { right: 2.5%; bottom: 6%; border-left: none;  border-top: none;    border-bottom-right-radius: 10px; }
     #hint { position: fixed; bottom: 12px; left: 0; right: 0; text-align: center; z-index: 5;
       color: #5a6a80; font-size: 12px; letter-spacing: 1px; pointer-events: none; }
     #banner { position: fixed; top: 38%; left: 0; right: 0; text-align: center; z-index: 6;
@@ -107,9 +154,12 @@
   }
   </script>
 
-  <!-- PeerJS: free public signaling so room-code multiplayer works on any static
-       host (Netlify/Vercel). Loaded as a global before the game modules. -->
-  <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.2/dist/peerjs.min.js"></script>
+  <!-- PeerJS: free WebRTC signalling (public PeerServer). Game data then flows
+       directly peer-to-peer, so the game runs on any static host (Netlify,
+       GitHub Pages, a plain file server) with NO backend of its own. Loaded as
+       a plain global (window.Peer); net.js reads it via a guarded factory. -->
+  <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+
 </head>
 <body>
   <div id="app"></div>
@@ -143,8 +193,25 @@
   </div>
 
   <div id="vignette"></div>
+
+  <!-- Sniper scope / iron sight: fades in as the FOV zooms (driven by
+       scopeProgress each frame). Pure CSS — vignette ring + crosshair +
+       center post + corner brackets. -->
+  <div id="scope" aria-hidden="true">
+    <div class="scope-vig"></div>
+    <div class="scope-cross-h"></div>
+    <div class="scope-cross-v"></div>
+    <div class="scope-dot"></div>
+    <div class="scope-ring"></div>
+    <div class="scope-corner tl"></div>
+    <div class="scope-corner tr"></div>
+    <div class="scope-corner bl"></div>
+    <div class="scope-corner br"></div>
+  </div>
+
   <div id="banner"></div>
-  <div id="hint">WASD move &middot; mouse look &middot; Shift run &middot; Space jump &middot; Click shoot &middot; Esc release cursor</div>
+  <div id="weapon-hud"><span id="weapon-name">PISTOL</span><span id="weapon-ammo">12/12</span></div>
+  <div id="hint">ZQSD move &middot; mouse look &middot; Shift run &middot; Space jump &middot; E climb watchtower &middot; 1-6 weapons &middot; R reload &middot; wheel switch &middot; RMB aim &middot; Esc release cursor</div>
 
   <div id="overlay">
     <h1>DEAD<span class="sub"> ARENA</span></h1>
@@ -156,24 +223,25 @@
       </div>
       <div class="mode" data-mode="multi">
         <span class="t">Multiplayer</span>
-        <span class="d">Create a room, share the code, and meet other players in the same arena.</span>
+        <span class="d">Create a room and share its code, or type a friend's code to join. Up to 4 players fight the same horde together.</span>
       </div>
     </div>
 
     <div class="multi hidden" id="multi">
       <div class="room-opts" id="room-opts">
-        <button class="btn primary" id="room-create">Create room</button>
-        <div class="join-row">
-          <input class="code-input" id="room-code-input" maxlength="5" placeholder="CODE" autocomplete="off" spellcheck="false" />
-          <button class="btn" id="room-join">Join room</button>
+        <button class="btn primary" id="room-create">Create a room</button>
+        <div class="room-join">
+          <input id="room-join-code" type="text" maxlength="6" placeholder="CODE" autocomplete="off" spellcheck="false" aria-label="Room code" />
+          <button class="btn" id="room-join">Join</button>
         </div>
-        <button class="btn ghost" id="room-back">&larr; Back</button>
+        <div class="room-join-hint">Or type the 5-letter code a friend shared, then click Join.</div>
       </div>
       <div class="room-ready hidden" id="room-ready">
-        <div class="room-code-label">Room code</div>
-        <div class="room-code" id="room-code" title="Click to copy">------</div>
-        <div class="room-hint" id="room-hint">Share this code — a friend types it in to join.</div>
+        <div class="room-code-label">Your room code</div>
+        <div class="room-code" id="room-code">-----</div>
+        <div class="room-hint" id="room-hint">Share this code — friends pick Multiplayer and type it to join. Click to play when ready.</div>
       </div>
+      <button class="btn ghost" id="room-back">&larr; Back</button>
       <div class="room-status" id="room-status"></div>
     </div>
     <div class="keys">
@@ -183,10 +251,20 @@
       <span style="align-self:center;color:#5a6a80">sprint</span>
       <kbd>Space</kbd>
       <span style="align-self:center;color:#5a6a80">jump</span>
+      <kbd>E</kbd>
+      <span style="align-self:center;color:#5a6a80">climb watchtower</span>
       <kbd>Click</kbd>
       <span style="align-self:center;color:#5a6a80">shoot</span>
       <kbd>Mouse</kbd>
       <span style="align-self:center;color:#5a6a80">look</span>
+      <kbd>1-6</kbd>
+      <span style="align-self:center;color:#5a6a80">weapons</span>
+      <kbd>R</kbd>
+      <span style="align-self:center;color:#5a6a80">reload</span>
+      <kbd>Wheel</kbd>
+      <span style="align-self:center;color:#5a6a80">switch</span>
+      <kbd>RMB</kbd>
+      <span style="align-self:center;color:#5a6a80">aim</span>
     </div>
     <div class="cta" id="cta">Click to play</div>
   </div>
@@ -215,9 +293,9 @@
       setTimeout(function () {
         if (!window.__appReady) {
           fail('Still loading…\n' +
-            '• Open it over http:// — do NOT double-click the .html file (ES modules are blocked under file://).\n' +
-            '• Serve the folder:  python3 -m http.server   (or  node server.js)  → then open the printed URL.\n' +
-            '• The page loads Three.js + PeerJS from CDNs, so it needs an internet connection. Check the console (F12).');
+            '• Open it over http(s):// — do NOT double-click the .html file (ES modules are blocked under file://).\n' +
+            '• This page is fully static; it just needs to be served (Netlify, GitHub Pages, or any static host).\n' +
+            '• Three.js and the PeerJS connection service load from a CDN, so it needs an internet connection. Check the console (F12).');
         }
       }, 5000);
     })();

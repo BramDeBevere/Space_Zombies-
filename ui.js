@@ -10,6 +10,8 @@ const distanceValue = document.getElementById('distance');
 const waveValue = document.getElementById('wave');
 const zombiesValue = document.getElementById('zombies');
 const playersValue = document.getElementById('players');
+const weaponName = document.getElementById('weapon-name');
+const weaponAmmo = document.getElementById('weapon-ammo');
 const banner = document.getElementById('banner');
 const modeSolo = document.querySelector('#overlay [data-mode="solo"]');
 const modeMulti = document.querySelector('#overlay [data-mode="multi"]');
@@ -22,11 +24,12 @@ const roomReady = document.getElementById('room-ready');
 const roomCode = document.getElementById('room-code');
 const roomHint = document.getElementById('room-hint');
 const roomStatus = document.getElementById('room-status');
-const codeInput = document.getElementById('room-code-input');
+const roomJoinCode = document.getElementById('room-join-code');
+const roomJoin = document.getElementById('room-join');
 
 let isDead = false;
 let modePickCb = null;   // set by main.js: picks solo/multi on the start screen
-let roomActionCb = null; // set by main.js: handles create/join/back
+let roomActionCb = null; // set by main.js: handles create / join-code / back
 
 export function setDead(dead) { isDead = dead; }
 export function onModePick(fn) { modePickCb = fn; }
@@ -34,42 +37,40 @@ export function onRoomAction(fn) { roomActionCb = fn; }
 if (modeSolo) modeSolo.addEventListener('click', (e) => { e.stopPropagation(); modePickCb && modePickCb('solo'); });
 if (modeMulti) modeMulti.addEventListener('click', (e) => { e.stopPropagation(); modePickCb && modePickCb('multi'); });
 if (document.getElementById('room-create')) document.getElementById('room-create').addEventListener('click', (e) => { e.stopPropagation(); roomActionCb && roomActionCb('create'); });
-if (document.getElementById('room-join')) document.getElementById('room-join').addEventListener('click', (e) => { e.stopPropagation(); const v = codeInput ? codeInput.value : ''; roomActionCb && roomActionCb('join', v); });
+if (roomJoin) roomJoin.addEventListener('click', (e) => { e.stopPropagation(); roomActionCb && roomActionCb('join-code', roomJoinCode ? roomJoinCode.value : ''); });
+if (roomJoinCode) roomJoinCode.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); roomActionCb && roomActionCb('join-code', roomJoinCode.value); } });
 if (document.getElementById('room-back')) document.getElementById('room-back').addEventListener('click', (e) => { e.stopPropagation(); roomActionCb && roomActionCb('back'); });
-if (roomCode) roomCode.addEventListener('click', (e) => { e.stopPropagation(); if (navigator.clipboard) navigator.clipboard.writeText(roomCode.textContent || ''); });
-if (codeInput) codeInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); roomActionCb && roomActionCb('join', codeInput.value); }
-  if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); roomActionCb && roomActionCb('back'); }
-});
 
-/** Show the multiplayer lobby (create / join by room code). */
+/** Show the multiplayer lobby (create a room, or type a code to join). */
 export function showMultiLobby() {
   if (modeRow) modeRow.classList.add('hidden');
   if (multi) multi.classList.remove('hidden');
-  if (overlayDesc) overlayDesc.innerHTML = 'Create a room or enter a code to join a friend.';
+  if (overlayDesc) overlayDesc.innerHTML = 'Create a room to get a code, or type a friend&rsquo;s code to join.';
   if (roomOpts) roomOpts.classList.remove('hidden');
   if (roomReady) roomReady.classList.add('hidden');
   if (roomStatus) roomStatus.textContent = '';
-  if (codeInput) { codeInput.value = ''; codeInput.focus(); }
+  if (roomJoinCode) roomJoinCode.value = '';
   if (cta) cta.textContent = '';
+}
+
+/** Switch the lobby to the host's "your room code" view. */
+export function setRoomName(code) {
+  if (!roomCode) return;
+  roomCode.textContent = code || '-----';
+  if (roomReady) roomReady.classList.remove('hidden');
+  if (roomOpts) roomOpts.classList.add('hidden');
+  if (roomHint) roomHint.textContent = 'Share this code — friends pick Multiplayer and type it to join. Click to play when ready.';
+}
+export function setRoomStatus(msg) { if (roomStatus) roomStatus.textContent = msg || ''; }
+export function showPlayWaiting() {
+  if (cta) cta.textContent = 'Click to play';
+  if (roomStatus) roomStatus.textContent = 'Waiting for friends to join…';
 }
 /** Hide the lobby and restore the normal start screen. */
 export function hideMultiLobby() {
   if (multi) multi.classList.add('hidden');
   if (modeRow) modeRow.classList.remove('hidden');
   if (cta) cta.textContent = 'Click to play';
-}
-export function setRoomCode(code) {
-  if (!roomCode) return;
-  roomCode.textContent = code;
-  if (roomReady) roomReady.classList.remove('hidden');
-  if (roomOpts) roomOpts.classList.add('hidden');
-  if (roomHint) roomHint.textContent = 'Share this code — a friend types it in to join.';
-}
-export function setRoomStatus(msg) { if (roomStatus) roomStatus.textContent = msg || ''; }
-export function showPlayWaiting() {
-  if (cta) cta.textContent = 'Click to play';
-  if (roomStatus) roomStatus.textContent = 'Waiting for a friend to join…';
 }
 
 export function formatTime(s) {
@@ -117,6 +118,11 @@ export function updateHUD(stats) {
   distanceValue.textContent = stats.alive === 0 ? '—' : `${stats.nearest.toFixed(1)}m`;
   zombiesValue.textContent = `${stats.alive}`;
   if (stats.players != null) playersValue.textContent = `${stats.players}`;
+  if (stats.weapon != null) weaponName.textContent = stats.weapon;
+  if (stats.ammo != null) {
+    weaponAmmo.textContent = stats.ammo;
+    weaponAmmo.classList.toggle('reloading', String(stats.ammo).toUpperCase() === 'RELOADING');
+  }
 }
 
 /**

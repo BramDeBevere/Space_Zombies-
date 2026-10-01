@@ -76,6 +76,149 @@ export function sfxShot() {
   osc.stop(t + 0.16);
 }
 
+/** Knife slash: a fast, high whoosh (short filtered noise with a rising sweep). */
+export function sfxKnife() {
+  if (!ctx) return;
+  const t = ctx.currentTime;
+  const src = ctx.createBufferSource();
+  src.buffer = noiseBuf;
+  const bp = ctx.createBiquadFilter();
+  bp.type = 'bandpass';
+  bp.frequency.setValueAtTime(500, t);
+  bp.frequency.exponentialRampToValueAtTime(2600, t + 0.08);
+  bp.Q.value = 1.2;
+  const g = ctx.createGain();
+  env(g, t, 0.35, 0.004, 0.09);
+  src.connect(bp).connect(g).connect(master);
+  src.start(t);
+  src.stop(t + 0.12);
+}
+
+/** Shotgun blast: a big, crackly, very close noise burst. */
+export function sfxShotgun() {
+  if (!ctx) return;
+  const t = ctx.currentTime;
+  const src = ctx.createBufferSource();
+  src.buffer = noiseBuf;
+  const lp = ctx.createBiquadFilter();
+  lp.type = 'lowpass';
+  lp.frequency.setValueAtTime(3200, t);
+  lp.frequency.exponentialRampToValueAtTime(300, t + 0.22);
+  const g = ctx.createGain();
+  env(g, t, 0.9, 0.003, 0.24);
+  src.connect(lp).connect(g).connect(master);
+  src.start(t);
+  src.stop(t + 0.28);
+
+  const osc = ctx.createOscillator();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(110, t);
+  osc.frequency.exponentialRampToValueAtTime(40, t + 0.22);
+  const og = ctx.createGain();
+  env(og, t, 0.5, 0.003, 0.22);
+  osc.connect(og).connect(master);
+  osc.start(t);
+  osc.stop(t + 0.26);
+}
+
+/** Sniper crack: a sharp, distant, powerful crack with a long low tail. */
+export function sfxSniper() {
+  if (!ctx) return;
+  const t = ctx.currentTime;
+  const src = ctx.createBufferSource();
+  src.buffer = noiseBuf;
+  const bp = ctx.createBiquadFilter();
+  bp.type = 'bandpass';
+  bp.frequency.setValueAtTime(4000, t);
+  bp.frequency.exponentialRampToValueAtTime(300, t + 0.3);
+  bp.Q.value = 1.5;
+  const g = ctx.createGain();
+  env(g, t, 0.7, 0.002, 0.32);
+  src.connect(bp).connect(g).connect(master);
+  src.start(t);
+  src.stop(t + 0.36);
+
+  const osc = ctx.createOscillator();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(70, t);
+  osc.frequency.exponentialRampToValueAtTime(32, t + 0.5);
+  const og = ctx.createGain();
+  env(og, t, 0.55, 0.004, 0.5);
+  osc.connect(og).connect(master);
+  osc.start(t);
+  osc.stop(t + 0.55);
+}
+
+/** RPG launch: a deep, whooshy thump that rolls into the engine. */
+export function sfxRPG() {
+  if (!ctx) return;
+  const t = ctx.currentTime;
+  const src = ctx.createBufferSource();
+  src.buffer = noiseBuf;
+  const lp = ctx.createBiquadFilter();
+  lp.type = 'lowpass';
+  lp.frequency.setValueAtTime(900, t);
+  lp.frequency.exponentialRampToValueAtTime(160, t + 0.6);
+  const g = ctx.createGain();
+  env(g, t, 0.5, 0.02, 0.55);
+  src.connect(lp).connect(g).connect(master);
+  src.start(t);
+  src.stop(t + 0.65);
+
+  const osc = ctx.createOscillator();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(140, t);
+  osc.frequency.exponentialRampToValueAtTime(50, t + 0.5);
+  const og = ctx.createGain();
+  env(og, t, 0.4, 0.02, 0.5);
+  osc.connect(og).connect(master);
+  osc.start(t);
+  osc.stop(t + 0.55);
+}
+
+/** Explosion: a huge low boom + a decaying noise wash. */
+export function sfxExplosion() {
+  if (!ctx) return;
+  const t = ctx.currentTime;
+  const src = ctx.createBufferSource();
+  src.buffer = noiseBuf;
+  const lp = ctx.createBiquadFilter();
+  lp.type = 'lowpass';
+  lp.frequency.setValueAtTime(2600, t);
+  lp.frequency.exponentialRampToValueAtTime(90, t + 0.9);
+  const g = ctx.createGain();
+  env(g, t, 1.0, 0.004, 0.95);
+  src.connect(lp).connect(g).connect(master);
+  src.start(t);
+  src.stop(t + 1.0);
+
+  const osc = ctx.createOscillator();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(90, t);
+  osc.frequency.exponentialRampToValueAtTime(30, t + 0.9);
+  const og = ctx.createGain();
+  env(og, t, 0.8, 0.005, 0.9);
+  osc.connect(og).connect(master);
+  osc.start(t);
+  osc.stop(t + 1.0);
+}
+
+/** Reload: two short mechanical clicks (mag in, bolt back). */
+export function sfxReload() {
+  if (!ctx) return;
+  const t = ctx.currentTime;
+  for (const [off, f] of [[0, 900], [0.22, 700]]) {
+    const osc = ctx.createOscillator();
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(f, t + off);
+    const g = ctx.createGain();
+    env(g, t + off, 0.12, 0.001, 0.05);
+    osc.connect(g).connect(master);
+    osc.start(t + off);
+    osc.stop(t + off + 0.08);
+  }
+}
+
 /** Zombie kill: a descending "groan" (two detuned low oscillators) + a soft thud. */
 export function sfxKill() {
   if (!ctx) return;

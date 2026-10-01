@@ -11,27 +11,33 @@ import { player, updatePlayer, resetPlayer } from './player.js';
 import {
   ZOMBIE_HP, ZOMBIE_HIT_DAMAGE, ZOMBIE_KNOCKBACK, WAVE_CLEAR_DELAY,
   zombies, spawnWave, cleanupWave, animateZombies, animateIdleZombies,
+  updateZombieHealthBar, killZombie, animateRemoteZombies,
+  makeZombieNet, removeZombie, findZombie,
 } from './zombie.js';
 import {
   tryFire, updateRecoil, updateWeaponRig, decayFlashlight,
-  updateWeaponEffects, resetRecoil, resetFire, setFireNet,
+  updateWeaponEffects, resetRecoil, setFireNet, setNetZombieDamage,
+  setAiming, isAutoFire, scopeProgress, selectWeapon, switchWeapon, requestReload,
+  resetWeapon, getWeaponName, getAmmo, setFireCallback, WEAPON_COUNT,
 } from './weapon.js';
 import {
   setDead, hideOverlay, showOverlay, showBanner, updateHUD, showDeath,
-  onModePick, onRoomAction, showMultiLobby, hideMultiLobby, setRoomCode,
-  setRoomStatus, showPlayWaiting,
+  onModePick, onRoomAction, showMultiLobby, hideMultiLobby,
+  setRoomName, setRoomStatus, showPlayWaiting,
   vignette, overlay, formatTime,
 } from './ui.js';
 import {
-  hostRoom, joinRoom, sendState, sendFire, sendHit,
-  getId, disconnect as netDisconnect,
+  connectLobby, createRoom, joinRoom, leaveRoom,
+  sendState, sendFire, sendHit, sendZState, sendWave,
+  sendBite, sendZombieHit, sendBoom, getRole, getId,
+  disconnect as netDisconnect,
 } from './net.js';
 import {
-  onPeer, onLeft, onState, onFire, updateRemotes, clearRemotes, remoteCount,
-  applyShot,
+  onLeft, onState, onFire, onBoom, updateRemotes, clearRemotes, remoteCount,
+  positions as remotePositions,
 } from './remotes.js';
 import {
-  ensureAudio, sfxStart, sfxHit, sfxWave, sfxDeath,
+  ensureAudio, sfxStart, sfxHit, sfxWave, sfxDeath, sfxKill,
   startAmbient, stopAmbient,
 } from './sound.js';
 
@@ -40,49 +46,113 @@ import {
 // ---------------------------------------------------------------------------
 const controls = new PointerLockControls(camera, renderer.domElement);
 
-// Click to fire (only while the pointer is locked and the game is live).
+// Sniper scope overlay (CSS in index.html); its opacity tracks scopeProgress()
+// each frame so the iron sight fades in as the FOV zooms and out as it relaxes.
+const scopeEl = document.getElementById('scope');
+const _biteDir = new THREE.Vector3();
+
+// --- Weapon input: click to fire (auto weapons fire while held), R to reload,
+// 1-6 / wheel to switch, right-click to aim the sniper. ---
+let mouseDown = false;   // left mouse held — drives auto-fire
+let aimHeld = false;     // right mouse held — sniper zoom
+
 renderer.domElement.addEventListener('mousedown', (e) => {
-  if (e.button !== 0) return;
   ensureAudio(); // unlock the AudioContext on the first user gesture
   if (!controls.isLocked || !playing || dead) return;
+  if (e.button === 0) { mouseDown = true; fireOnce(); }
+  else if (e.button === 2) { aimHeld = true; setAiming(true); }
+});
+renderer.domElement.addEventListener('mouseup', (e) => {
+  if (e.button === 0) mouseDown = false;
+  else if (e.button === 2) { aimHeld = false; setAiming(false); }
+});
+renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
+
+// Hotkeys 1-6 select a weapon; R starts a reload.
+window.addEventListener('keydown', (e) => {
+  if (!controls.isLocked || !playing || dead) return;
+  if (e.code.startsWith('Digit')) {
+    const n = parseInt(e.code.slice(5), 10);
+    if (n >= 1 && n <= WEAPON_COUNT) selectWeapon(n - 1);
+  } else if (e.code === 'KeyR') {
+    requestReload();
+  }
+});
+// Mouse wheel cycles weapons.
+window.addEventListener('wheel', (e) => {
+  if (!controls.isLocked || !playing || dead) return;
+  switchWeapon(e.deltaY > 0 ? 1 : -1);
+}, { passive: true });
+
+// Fire the current weapon once and route the result (kills / net).
+function fireOnce() {
+  if (!controls.isLocked || !playing || dead) return;
+  const res = tryFire();
+  if (res) routeFire(res);
+}
+
+// Route a fire result: apply + count kills (solo) or apply/report per-weapon
+// damage + PvP hits + explosions (multiplayer, host-authoritative).
+function routeFire(res) {
   if (mode === 'multi') {
-    // PvP: raycast against the other players and broadcast the damage.
-    tryFire(null, () => {
-      const hit = applyShot(camera);
-      if (hit) sendHit(hit.id, hit.dmg);
-    });
+    if (getRole() === 'host') {
+      for (const zh of res.zHits) { const z = findZombie(zh.id); if (z) hostZombieDamage(z, zh.dmg); }
+    } else {
+      for (const zh of res.zHits) sendZombieHit(zh.id, zh.dmg);
+    }
+    for (const rh of res.remoteHits) sendHit(rh.id, rh.dmg);
+    if (res.boom) sendBoom(res.boom.x, res.boom.y, res.boom.z, res.blastR);
   } else {
-    tryFire(() => { kills++; });
+    for (const zh of res.zHits) if (applyZombieHit(zh.id, zh.dmg)) kills++;
+  }
+}
+
+// Solo: apply damage to a local zombie; returns true if this shot killed it.
+function applyZombieHit(id, dmg) {
+  const z = findZombie(id);
+  if (!z || z.dead) return false;
+  z.hp = Math.max(0, z.hp - dmg);
+  updateZombieHealthBar(z);
+  if (z.hp <= 0) { killZombie(z); sfxKill(); return true; }
+  return false;
+}
+
+// The RPG detonates asynchronously inside weapon.js; route that blast here too.
+setFireCallback(routeFire);
+
+// Start-screen mode picker (Solo / Multiplayer).
+onModePick(async (m) => {
+  mode = m;
+  if (m === 'multi') {
+    showMultiLobby();
+    try { await connectLobby(netHandler); }  // open the WebRTC signalling peer
+    catch { setRoomStatus('Could not open a connection. Reload and try again.'); }
+  } else {
+    hideMultiLobby();
   }
 });
 
-// Start-screen mode picker (Solo / Multiplayer).
-onModePick((m) => { mode = m; if (m === 'multi') showMultiLobby(); else hideMultiLobby(); });
-
-// Multiplayer lobby actions: create a room / join by code / back.
-onRoomAction(async (action, code) => {
-  if (action === 'back') { hideMultiLobby(); mode = 'solo'; netDisconnect(); return; }
-  if (!window.Peer) { setRoomStatus('Multiplayer unavailable — check your internet connection.'); return; }
+// Multiplayer lobby actions: create a room, join by code, or back.
+// 'create' fires the 'created' event (netHandler) with the fresh code;
+// 'join-code' resolves once the WebRTC data channel to the host is open.
+onRoomAction((action, code) => {
+  if (action === 'back') { multiReady = false; leaveRoom(); hideMultiLobby(); mode = 'solo'; return; }
   if (action === 'create') {
     setRoomStatus('Creating room…');
-    try {
-      const res = await hostRoom(netHandler);
-      setRoomCode(res.code);
-      showPlayWaiting();
-    } catch (e) {
-      setRoomStatus('Could not create a room. Check your connection and try again.');
-    }
-  } else if (action === 'join') {
-    const c = String(code || '').trim();
-    if (!c) { setRoomStatus('Enter a room code first.'); return; }
+    createRoom('My Room').then(() => setRoomStatus('')); // code shown via 'created'
+  } else if (action === 'join-code') {
+    const c = (code || '').trim().toUpperCase();
+    if (c.length < 3) { setRoomStatus('Type the 5-letter code the host shared.'); return; }
     setRoomStatus('Joining…');
-    try {
-      await joinRoom(c, netHandler);
-      hideMultiLobby();
-      beginMulti();
-    } catch (e) {
-      setRoomStatus((e && e.message) || 'Could not join that room.');
-    }
+    joinRoom(c).then((r) => {
+      if (r && r.roomId) {
+        multiReady = true;
+        hideMultiLobby();
+        showOverlay('DEAD<span class="sub"> ARENA</span>', `In room <b>${r.roomId}</b>. Click to play.`);
+      } else {
+        setRoomStatus('Could not join that room. Check the code and try again.');
+      }
+    });
   }
 });
 
@@ -102,17 +172,48 @@ const _forward = new THREE.Vector3();
 // --- Multiplayer state ---
 let mode = 'solo';        // 'solo' | 'multi'
 let mpActive = false;     // true while we're connected + playing multi
+let multiReady = false;   // in a room, waiting to click "play" (host or joiner)
+let mpWave = 0;           // shared wave number (host authoritative; joiner mirrors)
 const _fireDir = new THREE.Vector3();
 
-// Shared net event router (used by both host and joiner).
+// Single net event router (lobby + game messages). Lobby events drive the
+// room list / host-ready / joiner-ready transitions; game events drive the
+// shared horde and remote players.
 function netHandler(t, d) {
-  if (t === 'peer') onPeer(d.id);
-  else if (t === 'left') onLeft(d.id);
+  // --- lobby ---
+  if (t === 'created') {
+    // We are the host. Show the room code and wait in our own room until we
+    // click "Click to play".
+    multiReady = true;
+    setRoomName(d.roomId);
+    showPlayWaiting();
+    return;
+  }
+  if (t === 'disconnected') {
+    // The signalling link dropped (e.g. the host's tab closed, or the network
+    // dropped). Return to the lobby if we were mid-game; otherwise just note it.
+    if (mpActive) {
+      exitMulti(false);
+      playing = false;
+      controls.unlock();
+      showMultiLobby();
+    } else if (mode === 'multi') {
+      setRoomStatus('Connection lost. Try again.');
+    }
+    return;
+  }
+  // --- game ---
+  if (t === 'left') onLeft(d.id);
   else if (t === 'state') onState(d);
   else if (t === 'fire') onFire(d);
   else if (t === 'hit') applyLocalHit(d);
+  else if (t === 'zstate') applyRemoteZombies(d.zs);
+  else if (t === 'wave') { mpWave = d.n; if (mpActive) showBanner('WAVE ' + d.n); }
+  else if (t === 'bite') applyLocalBite(d);
+  else if (t === 'zhit' && getRole() === 'host') hostZombieHit(d);
+  else if (t === 'boom') onBoom(d);
   else if (t === 'error') setRoomStatus(d.message || 'Connection problem.');
-  else if (t === 'disconnected') { setRoomStatus('Connection lost to host.'); }
+  else if (t === 'disconnected') { setRoomStatus('Connection lost to the server.'); }
 }
 
 // ---------------------------------------------------------------------------
@@ -136,7 +237,7 @@ function startGame() {
   player.hp = ZOMBIE_HP;
   resetPlayer();
   resetRecoil();
-  resetFire();
+  resetWeapon();
   wave = 1;
   kills = 0;
   waveDelay = 0;
@@ -162,31 +263,126 @@ function start() {
 function enterMulti() {
   mode = 'multi';
   mpActive = true;
+  mpWave = 0;
+  waveDelay = 0;
+  hostZStateTimer = 0;
+  setNetZombieDamage(true);   // the host/joiner net path handles shared-zombie damage
+  cleanupWave();              // start with no local horde; the host streams it
+  if (getRole() === 'host') { wave = 1; spawnWave(1); sendWave(1); }
   const ps = document.getElementById('players-stat');
   if (ps) ps.style.display = '';
-  cleanupWave(); // no zombies in multiplayer
-  // (networking is already connected via hostRoom/joinRoom before we get here)
+  // (the lobby WebSocket is already open and we're in a room by the time we get here)
 }
 
-function exitMulti() {
+function exitMulti(full) {
   mpActive = false;
+  mpWave = 0;
   setFireNet(null);
-  netDisconnect();
+  setNetZombieDamage(false);
+  if (full) netDisconnect();   // full teardown (back to solo / connection lost)
   clearRemotes();
+  cleanupWave();
   const ps = document.getElementById('players-stat');
   if (ps) ps.style.display = 'none';
+}
+
+// --- Shared horde (multiplayer) -------------------------------------------
+// The HOST is authoritative: it simulates the horde (each zombie chasing the
+// nearest player) and streams positions to the joiners. Joiners render that
+// stream and report their shots back to the host so a kill drops for everyone.
+
+let hostZStateTimer = 0;
+
+// Who the horde should chase: us, plus (host only) the other players. The y
+// height lets the host know when a player is up on a watchtower deck (out of
+// the horde's bite reach).
+function multiTargets() {
+  const t = [{ id: 'me', x: player.feet.x, z: player.feet.z, y: player.feet.y }];
+  if (getRole() === 'host') for (const p of remotePositions()) t.push(p);
+  return t;
+}
+
+// Host: run the horde this frame and stream it.
+function hostMulti(dt, camera) {
+  const anyAlive = animateZombies(dt, {
+    player, camera, targets: multiTargets(),
+    onBite: (tid, dir, z) => {
+      const dmg = z ? z.damage : ZOMBIE_HIT_DAMAGE;
+      const kb = z ? z.knockback : ZOMBIE_KNOCKBACK;
+      if (tid === 'me') {
+        player.hp -= dmg;
+        player.velocity.addScaledVector(dir, -kb);
+        sfxHit();
+        vignette.style.opacity = 0.9;
+        if (player.hp <= 0) respawnMulti();
+      }
+      sendBite(tid, tid, dmg, kb, dir);
+    },
+  });
+  if (anyAlive) waveDelay = 0;
+  else {
+    waveDelay += dt;
+    if (waveDelay >= WAVE_CLEAR_DELAY) {
+      waveDelay = 0; wave++; cleanupWave(); spawnWave(wave); sendWave(wave); showBanner('WAVE ' + wave); sfxWave();
+    }
+  }
+  hostZStateTimer += dt;
+  if (hostZStateTimer >= 0.05) {
+    hostZStateTimer = 0;
+    sendZState(zombies.map((z) => ({
+      id: z.id, type: z.type, x: z.group.position.x, z: z.group.position.z,
+      y: z.group.position.y, ry: z.group.rotation.y, hp: Math.round(z.hp), dead: z.dead,
+    })));
+  }
+}
+
+// Host: a shot/blast landed on a shared zombie (from the host or any joiner).
+function hostZombieDamage(z, dmg) {
+  if (!z || z.dead) return;
+  z.hp = Math.max(0, z.hp - dmg);
+  updateZombieHealthBar(z);
+  if (z.hp <= 0) killZombie(z);
+}
+function hostZombieHit(d) { const z = findZombie(d.tid); if (z) hostZombieDamage(z, d.dmg || 22); }
+
+// Joiner: reconcile our render zombies with the host's streamed snapshot.
+function applyRemoteZombies(zs) {
+  if (!Array.isArray(zs)) return;
+  const seen = new Set();
+  for (const s of zs) {
+    seen.add(s.id);
+    let z = findZombie(s.id);
+    if (!z) z = makeZombieNet(s.id, s.x, s.z, s.type);
+    z.net = { x: s.x, z: s.z, y: s.y || 0, ry: s.ry };
+    z.netDead = !!s.dead;
+    z.hp = s.hp;
+    if (s.dead && !z.dead) killZombie(z);
+  }
+  for (const z of [...zombies]) if (!seen.has(z.id)) removeZombie(z);
+}
+
+// Joiner: the shared horde bit us.
+function applyLocalBite(d) {
+  if (d.pid !== getId()) return;
+  player.hp -= d.dmg;
+  const bdx = d.dx || 0, bdz = d.dz || 0;
+  if (bdx || bdz) player.velocity.addScaledVector(_biteDir.set(bdx, 0, bdz), -(d.kb || ZOMBIE_KNOCKBACK));
+  sfxHit();
+  vignette.style.opacity = 0.9;
+  if (player.hp <= 0) respawnMulti();
 }
 
 // Begin a multiplayer session (host: click "play" while in their lobby;
 // joiner: right after joining). Networking is already live at this point.
 function beginMulti() {
   dead = false;
+  multiReady = false;
   everStarted = true;
   setDead(false);
   player.hp = ZOMBIE_HP;
   resetPlayer();
   resetRecoil();
-  resetFire();
+  resetWeapon();
   survived = 0;
   vignette.style.opacity = 0;
   hideMultiLobby();
@@ -194,7 +390,7 @@ function beginMulti() {
   ensureAudio();
   sfxStart();
   startAmbient();
-  setFireNet((muzzle, end) => sendFire(muzzle.x, muzzle.y, muzzle.z, end.x, end.y, end.z));
+  setFireNet((res) => sendFire(res));
   enterMulti();
   showBanner('MULTIPLAYER');
   controls.lock();
@@ -215,6 +411,7 @@ function applyLocalHit(d) {
 function respawnMulti() {
   player.hp = ZOMBIE_HP;
   resetPlayer();
+  resetWeapon();   // fresh ammo + no stray rockets / reloads
   showBanner('YOU RESPAWNED');
 }
 
@@ -231,10 +428,12 @@ controls.addEventListener('unlock', () => {
 });
 
 // First click starts the game; afterwards the overlay click just re-locks
-// (resume) or restarts after death.
+// (resume) or restarts after death. `multiReady` covers "in a room, waiting to
+// play" for both host and (re)joiners of a new room.
 overlay.addEventListener('click', () => {
   ensureAudio(); // first user gesture — unlock the AudioContext
-  if (dead) start();
+  if (multiReady) start();
+  else if (dead) start();
   else if (!everStarted) start();
   else if (!controls.isLocked) controls.lock();
 });
@@ -265,13 +464,19 @@ function update(dt) {
   const speed = Math.hypot(vx, vz);
   updateWeaponRig(_forward, lateral, forwardMove, speed, dt, player.onGround);
 
+  // Sniper scope: fade the iron sight in/out in lockstep with the zoom.
+  if (scopeEl) {
+    const p = scopeProgress();
+    scopeEl.style.opacity = playing && !dead ? (p > 0 ? (0.2 + 0.8 * p).toFixed(3) : '0') : '0';
+  }
+
   // --- Solo mode: zombies chase, attack, die; waves advance ---
   if (mode === 'solo') {
     const anyAlive = animateZombies(dt, {
       player, camera, vignette,
-      onZombieHit: (dir) => {
-        player.hp -= ZOMBIE_HIT_DAMAGE;
-        player.velocity.addScaledVector(dir, -ZOMBIE_KNOCKBACK);
+      onZombieHit: (dir, z) => {
+        player.hp -= z ? z.damage : ZOMBIE_HIT_DAMAGE;
+        player.velocity.addScaledVector(dir, -(z ? z.knockback : ZOMBIE_KNOCKBACK));
         sfxHit();
         vignette.style.opacity = 0.9;
         setTimeout(() => {
@@ -304,7 +509,13 @@ function update(dt) {
     const yaw = Math.atan2(_forward.x, _forward.z);
     sendState(player.feet.x, player.feet.y, player.feet.z, yaw, player.hp);
     updateRemotes(dt, camera);
+    // Shared horde: the host simulates + streams; joiners render the stream.
+    if (getRole() === 'host') hostMulti(dt, camera);
+    else animateRemoteZombies(dt, camera);
   }
+
+  // --- Auto-fire: full-auto weapons fire continuously while held ---
+  if (mouseDown && isAutoFire()) fireOnce();
 
   // --- Weapon housekeeping ---
   decayFlashlight(dt);
@@ -337,9 +548,12 @@ function animate() {
     const d = Math.hypot(z.group.position.x - player.feet.x, z.group.position.z - player.feet.z);
     if (d < nearest) nearest = d;
   }
+  const ammo = getAmmo();
   updateHUD({
     hp: player.hp, maxHp: ZOMBIE_HP, survived, wave, nearest, alive,
     players: mode === 'multi' ? remoteCount() + 1 : undefined,
+    weapon: getWeaponName(),
+    ammo: ammo ? (ammo.reloading ? 'RELOADING' : `${ammo.mag}/${ammo.max}`) : '∞',
   });
 
   // Keep the sky dome centred on the player: follow position only, never
