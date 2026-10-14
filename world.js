@@ -39,6 +39,8 @@ scene.fog = new THREE.FogExp2(0x2a3852, 0.0072); // a bit thinner so the bigger 
 // always stays centred inside it; its orientation never changes, which keeps
 // the stars and moon locked to fixed world directions.
 export let skyDome = null;
+// Day sky dome — crossfades over the night dome during the day/night cycle.
+export let dayDome = null;
 
 // --- Camera ---
 export const camera = new THREE.PerspectiveCamera(
@@ -65,21 +67,47 @@ camera.position.set(0, EYE_HEIGHT, 0);
   scene.add(skyDome);
 }
 
-// --- Moonlight (single cool directional + soft hemisphere fill) ---
-scene.add(new THREE.HemisphereLight(0x6b80a8, 0x242e42, 1.8));
-const moon = new THREE.DirectionalLight(0xb6d0ff, 2.7);
-moon.position.set(-30, 50, 20);
-moon.castShadow = true;
-moon.shadow.mapSize.set(1024, 1024);
-moon.shadow.camera.near = 1;
-moon.shadow.camera.far = 140;
-moon.shadow.camera.left = -ARENA_HALF;
-moon.shadow.camera.right = ARENA_HALF;
-moon.shadow.camera.top = ARENA_HALF;
-moon.shadow.camera.bottom = -ARENA_HALF;
-moon.shadow.bias = -0.0008;
-scene.add(moon);
-scene.add(moon.target);
+// --- Day sky dome (crossfades over the night dome during the day cycle) ---
+// A slightly smaller radius than the night dome so its inner surface always
+// passes the depth test in front of it; transparent + depthWrite:false means at
+// opacity 0 it fully reveals the night sky and at opacity 1 it fully covers it.
+// dayCycle.js drives its opacity from the phase.
+{
+  const DAY_SKY_RADIUS = 344;
+  dayDome = new THREE.Mesh(
+    new THREE.SphereGeometry(DAY_SKY_RADIUS, 32, 24),
+    new THREE.MeshBasicMaterial({
+      map: makeDaySkyTexture(),
+      side: THREE.BackSide,
+      fog: false,
+      depthWrite: false,
+      transparent: true,
+      opacity: 0,
+      toneMapped: false,
+    })
+  );
+  dayDome.renderOrder = 2;
+  scene.add(dayDome);
+}
+
+// --- Sun/moon (one directional light the day cycle retunes) + hemisphere fill ---
+// dayCycle.js lerps sunLight between the cool NIGHT moon and the warm DAY sun,
+// and retunes hemi. Both are exported so the cycle can drive them each frame.
+export const hemi = new THREE.HemisphereLight(0x6b80a8, 0x242e42, 1.8);
+scene.add(hemi);
+export const sunLight = new THREE.DirectionalLight(0xb6d0ff, 2.7);
+sunLight.position.set(-30, 50, 20);
+sunLight.castShadow = true;
+sunLight.shadow.mapSize.set(1024, 1024);
+sunLight.shadow.camera.near = 1;
+sunLight.shadow.camera.far = 140;
+sunLight.shadow.camera.left = -ARENA_HALF;
+sunLight.shadow.camera.right = ARENA_HALF;
+sunLight.shadow.camera.top = ARENA_HALF;
+sunLight.shadow.camera.bottom = -ARENA_HALF;
+sunLight.shadow.bias = -0.0008;
+scene.add(sunLight);
+scene.add(sunLight.target);
 
 // --- Arena floor (generated grid texture — no external assets) ---
 {
@@ -616,6 +644,50 @@ function makeSkyTexture() {
     ctx.fillStyle = `rgba(255,255,255,${Math.random() * 0.85})`;
     const s = Math.random() * 2.2 + 0.2;
     ctx.fillRect(x, y, s, s);
+  }
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.mapping = THREE.EquirectangularReflectionMapping;
+  return tex;
+}
+
+// Day sky (equirectangular: 2:1, blue gradient + a sun + soft clouds) — generated.
+function makeDaySkyTexture() {
+  const w = 1024, h = 512;
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext('2d');
+
+  const g = ctx.createLinearGradient(0, 0, 0, h);
+  g.addColorStop(0, '#3f74c4');
+  g.addColorStop(0.55, '#7fa8dd');
+  g.addColorStop(0.78, '#bcd6ec');
+  g.addColorStop(1, '#d8e6f2');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, w, h);
+
+  // A bright sun, pinned to a fixed spot on the dome (mirrors the moon's place
+  // on the night texture, on the opposite side).
+  const sx = w * 0.3, sy = h * 0.3, r = 70;
+  const sun = ctx.createRadialGradient(sx, sy, 2, sx, sy, r);
+  sun.addColorStop(0, 'rgba(255,250,235,1)');
+  sun.addColorStop(0.4, 'rgba(255,240,200,0.7)');
+  sun.addColorStop(1, 'rgba(255,235,180,0)');
+  ctx.fillStyle = sun;
+  ctx.fillRect(0, 0, w, h);
+
+  // Soft cloud bands across the lower dome.
+  for (let i = 0; i < 26; i++) {
+    const cx = Math.random() * w, cy = h * (0.5 + Math.random() * 0.25);
+    const cw = 120 + Math.random() * 220, ch = 12 + Math.random() * 22;
+    const cg = ctx.createRadialGradient(cx, cy, 0, cx, cy, cw / 2);
+    cg.addColorStop(0, `rgba(255,255,255,${0.10 + Math.random() * 0.12})`);
+    cg.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = cg;
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, cw / 2, ch, 0, 0, Math.PI * 2);
+    ctx.fill();
   }
 
   const tex = new THREE.CanvasTexture(canvas);

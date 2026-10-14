@@ -1,6 +1,7 @@
 // Zombies — the horde. Building, spawning waves, chasing, dying and cleanup.
 import * as THREE from 'three';
 import { ARENA_HALF, scene, obstacles, towers } from './world.js';
+import { nightFactor } from './dayCycle.js';
 
 // --- Tunable constants (zombies) ---
 const ZOMBIE_RADIUS = 0.6;
@@ -29,15 +30,17 @@ const SHARED_ZMAT = {
   eye: new THREE.MeshStandardMaterial({ color: 0x1a0000, emissive: 0xff2a2a, emissiveIntensity: 3 }),
 };
 
-// The three archetypes. Each trades speed / bulk / damage / toughness for a
+// The archetypes. Each trades speed / bulk / damage / toughness for a
 // distinct role in the horde:
 //   small  (Scout)  — fast, swarms, dies to one or two shots, weak bites.
 //   medium (Walker) — the balanced default.
 //   large  (Brute)  — slow & tanky, hits and shoves hard, climbs sluggishly.
+//   runner (Runner) — fast and fragile, with a bright, aggressive palette.
 const ZOMBIE_TYPES = {
   small:  { name: 'Scout',  scale: 0.72, speed: 4.6, hp: 55,  damage: 8,  knockback: 8,  climb: 3.2, radius: 0.42, hitRange: 1.5, skin: 0x6f8f4f, tunic: 0x4a5a3a },
   medium: { name: 'Walker', scale: 1.0,  speed: 3.2, hp: 100, damage: 12, knockback: 12, climb: 2.2, radius: 0.6,  hitRange: 1.9, skin: 0x4f6b45, tunic: 0x2f3a30 },
   large:  { name: 'Brute',  scale: 1.55, speed: 2.1, hp: 240, damage: 26, knockback: 22, climb: 1.4, radius: 0.95, hitRange: 2.3, skin: 0x5a3b3b, tunic: 0x3a2222 },
+  runner: { name: 'Runner', scale: 0.86, speed: 5.4, hp: 65, damage: 10, knockback: 9, climb: 3.0, radius: 0.5, hitRange: 1.7, skin: 0xb86f3c, tunic: 0x6b3824 },
   // Flier: glides at height (never touches the ground), so towers give you no
   // air safety from it; it's fragile-ish but relentless and can't be blocked by cover.
   flier:  { name: 'Flier',  scale: 0.9,  speed: 4.0, hp: 90,  damage: 14, knockback: 14, climb: 2.2, radius: 0.5,  hitRange: 2.1, skin: 0x4a6a70, tunic: 0x2a3f45, fly: true, hover: 2.2 },
@@ -111,6 +114,7 @@ function createFlyingZombieGroup(type) {
   head.position.set(0, 1.95, 0.12);
   head.rotation.x = 0.2;
   head.castShadow = true;
+  head.userData.isHead = true; // weapon.js: headshot detection
 
   // Arm-wings held out and up, flapping in animateZombies.
   const wingGeo = new THREE.BoxGeometry(0.18, 0.95, 0.2);
@@ -156,8 +160,7 @@ function createZombieGroup(type) {
 
   const head = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.46, 0.46), M.skin);
   head.position.y = 1.75;
-  head.castShadow = true;
-
+  head.castShadow = true;  head.userData.isHead = true; // weapon.js: headshot detection
   const armGeo = new THREE.BoxGeometry(0.18, 0.7, 0.18);
   const armL = new THREE.Mesh(armGeo, M.skin);
   armL.position.set(-0.45, 1.15, 0);
@@ -176,6 +179,7 @@ function createZombieGroup(type) {
 
   const eye = new THREE.Mesh(new THREE.SphereGeometry(0.05, 8, 8), M.eye);
   eye.position.set(0, 1.78, 0.24);
+  eye.userData.isHead = true; // counts as a head hit
 
   group.add(body, head, armL, armR, legL, legR, eye);
   group.scale.setScalar(scale);
@@ -258,8 +262,14 @@ function zombieCountFor(w) { return Math.min(w, MAX_WAVE_ZOMBIES); }
 // fliers from wave 3, and both get more common as the waves grow; scouts stay
 // a steady third.
 function pickType(w) {
+  const night = nightFactor(); // 0 = day, 1 = night
   if (w >= 2 && Math.random() < Math.min(0.4, 0.05 + 0.05 * w)) return 'large';
-  if (w >= 3 && Math.random() < Math.min(0.25, 0.08 + 0.03 * w)) return 'flier';
+  if (w >= 2 && Math.random() < 0.12) return 'runner';
+  // Fliers are nocturnal: rare by day, common by night — and the darkness can
+  // bring them out even before wave 3.
+  const base = Math.min(0.25, 0.08 + 0.03 * Math.max(w, 1));
+  const flierChance = (w >= 3 ? base : base * 0.4) + 0.5 * night;
+  if (Math.random() < Math.min(0.7, flierChance)) return 'flier';
   return Math.random() < 0.4 ? 'small' : 'medium';
 }
 

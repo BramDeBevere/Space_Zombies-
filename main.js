@@ -6,7 +6,8 @@
 import * as THREE from 'three';
 import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
 
-import { renderer, scene, camera, skyDome } from './world.js';
+import { renderer, scene, camera, skyDome, dayDome } from './world.js';
+import { updateDayNight } from './dayCycle.js';
 import { player, updatePlayer, resetPlayer, applySpawn, towerInRange } from './player.js';
 import {
   ZOMBIE_HP, ZOMBIE_HIT_DAMAGE, ZOMBIE_KNOCKBACK, WAVE_CLEAR_DELAY,
@@ -62,6 +63,43 @@ const controls = new PointerLockControls(camera, renderer.domElement);
 // each frame so the iron sight fades in as the FOV zooms and out as it relaxes.
 const scopeEl = document.getElementById('scope');
 const _biteDir = new THREE.Vector3();
+const dmgEl = document.getElementById('damage-indicator');
+const hitEl = document.getElementById('hit-marker');
+const _dmgCamDir = new THREE.Vector3();
+
+// Flash a small X on the crosshair the instant a shot lands. Three tiers:
+// kill (red + largest) > headshot (gold) > normal hit (white).
+function showHitMarker(killed, crit) {
+  if (!hitEl) return;
+  hitEl.classList.toggle('kill', !!killed);
+  hitEl.classList.toggle('crit', !killed && !!crit);
+  hitEl.classList.remove('show');
+  void hitEl.offsetWidth; // restart the CSS animation
+  hitEl.classList.add('show');
+}
+
+// Swing a red wedge at the screen edge toward whoever just hurt us. (wx, wz)
+// is the horizontal direction from the player toward the attacker (need not be
+// unit length). The wedge's rotation is recomputed against the current view so
+// it always points at the threat in screen space.
+function showDamageIndicator(wx, wz) {
+  if (!dmgEl) return;
+  const len = Math.hypot(wx, wz);
+  if (len < 1e-4) return;
+  wx /= len; wz /= len;
+  camera.getWorldDirection(_dmgCamDir);
+  _dmgCamDir.y = 0;
+  const fl = Math.hypot(_dmgCamDir.x, _dmgCamDir.z);
+  if (fl < 1e-4) return;
+  _dmgCamDir.x /= fl; _dmgCamDir.z /= fl;
+  const front = wx * _dmgCamDir.x + wz * _dmgCamDir.z;
+  const right = wx * (-_dmgCamDir.z) + wz * _dmgCamDir.x;
+  const angDeg = Math.atan2(right, front) * (180 / Math.PI);
+  dmgEl.style.transform = `translate(-50%,-50%) rotate(${angDeg.toFixed(1)}deg)`;
+  dmgEl.classList.remove('show');
+  void dmgEl.offsetWidth;
+  dmgEl.classList.add('show');
+}
 
 // --- Weapon input: click to fire (auto weapons fire while held), R to reload,
 // 1-6 / wheel to switch, right-click to aim the sniper. ---
@@ -105,23 +143,32 @@ function fireOnce() {
   if (!controls.isLocked || !playing || dead) return;
   if (mpActive && mpDead) return; // downed: no shooting until we respawn next wave
   const res = tryFire();
-  if (res) routeFire(res);
+  if (!res) return;
+  const killed = routeFire(res);
+  // Flash a hit marker the moment a shot connects (red for a kill, gold for a
+  // headshot, white otherwise).
+  if (res.zHits.length || res.remoteHits.length) {
+    const crit = !killed && (res.zHits.some((h) => h.crit) || res.remoteHits.some((h) => h.crit));
+    showHitMarker(killed, crit);
+  }
 }
 
 // Route a fire result: apply + count kills (solo) or apply/report per-weapon
 // damage + PvP hits + explosions (multiplayer, host-authoritative).
 function routeFire(res) {
+  let killed = false;
   if (mode === 'multi') {
     if (getRole() === 'host') {
-      for (const zh of res.zHits) { const z = findZombie(zh.id); if (z) hostZombieDamage(z, zh.dmg); }
+      for (const zh of res.zHits) { const z = findZombie(zh.id); if (z) killed = hostZombieDamage(z, zh.dmg) || killed; }
     } else {
       for (const zh of res.zHits) sendZombieHit(zh.id, zh.dmg);
     }
     for (const rh of res.remoteHits) sendHit(rh.id, rh.dmg);
     if (res.boom) sendBoom(res.boom.x, res.boom.y, res.boom.z, res.blastR);
   } else {
-    for (const zh of res.zHits) if (applyZombieHit(zh.id, zh.dmg)) kills++;
+    for (const zh of res.zHits) if (applyZombieHit(zh.id, zh.dmg)) { kills++; killed = true; }
   }
+  return killed;
 }
 
 // Solo: apply damage to a local zombie; returns true if this shot killed it.
@@ -359,6 +406,7 @@ function hostMulti(dt, camera) {
         player.hp -= dmg;
         player.velocity.addScaledVector(dir, -kb);
         sfxHit();
+        showDamageIndicator(-dir.x, -dir.z);
         vignette.style.opacity = 0.9;
         if (player.hp <= 0) downInPlace();
       }
@@ -395,10 +443,11 @@ function hostMulti(dt, camera) {
 
 // Host: a shot/blast landed on a shared zombie (from the host or any joiner).
 function hostZombieDamage(z, dmg) {
-  if (!z || z.dead) return;
+  if (!z || z.dead) return false;
   z.hp = Math.max(0, z.hp - dmg);
   updateZombieHealthBar(z);
-  if (z.hp <= 0) killZombie(z);
+  if (z.hp <= 0) { killZombie(z); return true; }
+  return false;
 }
 function hostZombieHit(d) { const z = findZombie(d.tid); if (z) hostZombieDamage(z, d.dmg || 22); }
 
@@ -425,6 +474,7 @@ function applyLocalBite(d) {
   const bdx = d.dx || 0, bdz = d.dz || 0;
   if (bdx || bdz) player.velocity.addScaledVector(_biteDir.set(bdx, 0, bdz), -(d.kb || ZOMBIE_KNOCKBACK));
   sfxHit();
+  if (bdx || bdz) showDamageIndicator(-bdx, -bdz);
   vignette.style.opacity = 0.9;
   if (player.hp <= 0) downInPlace();
 }
@@ -460,6 +510,8 @@ function applyLocalHit(d) {
   if (d.target !== getId()) return;
   player.hp -= d.dmg;
   sfxHit();
+  const rp = remotePositions().find((r) => r.id === d.id);
+  if (rp) showDamageIndicator(rp.x - player.feet.x, rp.z - player.feet.z);
   vignette.style.opacity = 0.9;
   if (player.hp <= 0) downInPlace();
 }
@@ -628,6 +680,7 @@ function update(dt) {
         player.hp -= z ? z.damage : ZOMBIE_HIT_DAMAGE;
         player.velocity.addScaledVector(dir, -(z ? z.knockback : ZOMBIE_KNOCKBACK));
         sfxHit();
+        showDamageIndicator(-dir.x, -dir.z);
         vignette.style.opacity = 0.9;
         setTimeout(() => {
           if (!dead) vignette.style.opacity = Math.max(0, 1 - player.hp / ZOMBIE_HP) * 0.5;
@@ -692,6 +745,9 @@ function animate() {
   // Clamp dt to avoid big jumps after a tab switch / pause.
   dt = Math.min(dt, 0.05);
 
+  // Day/night cycle: advance + re-light every frame (drifts on the menu too).
+  updateDayNight(dt);
+
   if (controls.isLocked && playing) update(dt);
   else if (!dead) animateIdleZombies();
 
@@ -722,6 +778,7 @@ function animate() {
   // Keep the sky dome centred on the player: follow position only, never
   // rotation, so the sky stays fixed in world space.
   if (skyDome) skyDome.position.copy(camera.position);
+  if (dayDome) dayDome.position.copy(camera.position);
 
   renderer.render(scene, camera);
 }

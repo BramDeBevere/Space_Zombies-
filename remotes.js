@@ -61,6 +61,7 @@ function makeRemote(id) {
   body.position.y = 1.05; body.castShadow = true;
   const head = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.46, 0.46), skin);
   head.position.y = 1.75; head.castShadow = true;
+  head.userData.isHead = true; // weapon.js: headshot detection
   const visor = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.12, 0.06), accent);
   visor.position.set(0, 1.78, 0.22);
   const legGeo = new THREE.BoxGeometry(0.2, 0.8, 0.2);

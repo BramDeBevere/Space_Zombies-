@@ -25,6 +25,11 @@ export const WEAPON_COUNT = WEAPONS.length;
 
 const LIGHT_BASE = 8;         // resting flashlight intensity
 
+// Headshots (a hit on the head / face) deal this multiple of the weapon's
+// normal damage — a precision-projectile concept, so melee swings and the RPG's
+// area blast are unaffected.
+const HEADSHOT_MULT = 2.0;
+
 // Ammo + reload + current-weapon state (reset on (re)start / respawn).
 let current = 1;                              // default to the pistol (index 1)
 const ammo = WEAPONS.map((w) => (w.ammo != null ? w.ammo : 0));
@@ -235,9 +240,9 @@ function spawnMuzzleFlash(pos, scale = 0.6, color = 0xffe0a0) {
   s.scale.set(scale, scale, 1);
   spawnEffect(s, 0.07);
 }
-function spawnHitSpark(pos) {
+function spawnHitSpark(pos, color = 0xff5a3a) {
   const s = new THREE.Sprite(new THREE.SpriteMaterial({
-    map: glowTex, color: 0xff5a3a, transparent: true, opacity: 1,
+    map: glowTex, color, transparent: true, opacity: 1,
     blending: THREE.AdditiveBlending, depthTest: false,
   }));
   s.position.copy(pos);
@@ -559,11 +564,14 @@ function doFire() {
     spawnTracer(m, to);
     result.tracers.push({ from: m.clone(), to: to.clone() });
     if (hit) {
-      spawnHitSpark(hit.point);
+      // A head / face hit lands a critical for double damage.
+      const isHead = !!hit.object.userData.isHead;
+      const dmg = Math.round(w.dmg * (isHead ? HEADSHOT_MULT : 1));
+      spawnHitSpark(hit.point, isHead ? 0xffd24a : undefined);
       const rd = hit.object.userData.remote;
       const zd = hit.object.userData.zombie;
-      if (rd) { damageRemote(rd, w.dmg); result.remoteHits.push({ id: rd.id, dmg: w.dmg }); }
-      else if (zd) { result.zHits.push({ id: zd.id, dmg: w.dmg }); }
+      if (rd) { damageRemote(rd, dmg); result.remoteHits.push({ id: rd.id, dmg, crit: isHead }); }
+      else if (zd) { result.zHits.push({ id: zd.id, dmg, crit: isHead }); }
     }
   }
   spawnMuzzleFlash(m, w.id === 'sniper' ? 1.3 : 0.6);
